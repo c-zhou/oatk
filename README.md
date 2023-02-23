@@ -1,7 +1,7 @@
-# Oatk: an organelle genome assembly toolkit
+# Oatk: an organelle genome assembly toolkit [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7631376.svg)](https://doi.org/10.5281/zenodo.7631376)
 
 ## Overview
-Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. The toolkit consists of three major tools. `run_syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmm_annotation` is a HMMER wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `path_finder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure.
+Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. The toolkit consists of three major tools. `run_syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmm_annotation` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `path_finder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure.
 
 ## Installation
 You need to have a C compiler, GNU make and zlib development files installed. Download the source code from this repo or with `git clone https://github.com/c-zhou/oatk.git`. Then type `make` in the source code directory to compile.
@@ -69,5 +69,5 @@ The major output files in this example include: `oatk.mito.fasta` and `oatk.mito
 
 ## Other auxiliary tools
 
-* ***path_to_fasta*** is a tool used to extract FASTA sequences from GFA file with a path. For example, `path_to_fasta oatk_utg_final.gfa u1+,u2-,u3-,u2+`.
+***path_to_fasta*** is a tool used to extract FASTA sequences from GFA file with a path. For example, `path_to_fasta oatk_utg_final.gfa u1+,u2-,u3-,u2+`.
 

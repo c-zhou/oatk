@@ -3,7 +3,7 @@ CFLAGS=		-g -Wall -O3 -Wextra -Wno-unused-result -Wunused-parameter -fno-strict-
 CPPFLAGS=
 INCLUDES=	
 OBJS=
-PROG=		run_syncasm hmm_annotation path_finder path_to_fasta
+PROG=		syncasm hmm_annotation path_finder path_to_fasta
 PROG_EXTRA=
 LIBS=		-lm -lz -lpthread
 
@@ -22,7 +22,7 @@ extra: all $(PROG_EXTRA)
 debug: $(PROG)
 debug: CFLAGS += -DDEBUG
 
-run_syncasm: run_syncasm.c syncasm.c syncmer.c graph.c alignment.c sstream.c cov.c misc.c MurmurHash3.c kalloc.c kopen.c
+syncasm: run_syncasm.c syncasm.c syncmer.c graph.c alignment.c sstream.c cov.c misc.c MurmurHash3.c kalloc.c kopen.c
 		$(CC) $(CFLAGS) run_syncasm.c syncasm.c syncmer.c graph.c alignment.c sstream.c cov.c misc.c MurmurHash3.c kalloc.c kopen.c -o $@ -L. $(LIBS) $(INCLUDES)
 
 hmm_annotation: annotation.c hmmannot.c misc.c kalloc.c kthread.c

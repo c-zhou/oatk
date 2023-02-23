@@ -125,7 +125,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
-        fprintf(fp_help, "Usage: run_syncasm [options] <target.fa[stq][.gz]>\n");
+        fprintf(fp_help, "Usage: run_syncasm [options] <target.fa[stq][.gz]> [...]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -k INT       kmer size [%d]\n", k);
         fprintf(fp_help, "    -s INT       smer size (no larger than 31) [%d]\n", s);

@@ -746,11 +746,12 @@ static int ha_analyze_count(int n_cnt, int start_cnt, const int64_t *cnt, int *p
         if (max2 < max * 0.05 || min > max2 * 0.95)
             max2 = -1, max2_i = -1;
     }
-    if (max2 > 0)
-        if (verbose > 0) fprintf(stderr, "[M::%s] left: count[%d] = %ld\n", __func__, max2_i, (long)cnt[max2_i]);
-    else 
-        if (verbose > 0) fprintf(stderr, "[M::%s] left: none\n", __func__);
-
+    if (verbose > 0) {
+        if (max2 > 0)
+            fprintf(stderr, "[M::%s] left: count[%d] = %ld\n", __func__, max2_i, (long)cnt[max2_i]);
+        else
+            fprintf(stderr, "[M::%s] left: none\n", __func__);
+    }
     // look for smaller peak on the high end
     max3 = -1; max3_i = -1;
     for (i = max_i + 1; i < n_cnt - 1; ++i)
@@ -764,10 +765,12 @@ static int ha_analyze_count(int n_cnt, int start_cnt, const int64_t *cnt, int *p
         if (max3 < max * 0.05 || min > max3 * 0.95 || max3_i > max_i * 2.5)
             max3 = -1, max3_i = -1;
     }
-    if (max3 > 0)
-        if (verbose > 0) fprintf(stderr, "[M::%s] right: count[%d] = %ld\n", __func__, max3_i, (long)cnt[max3_i]);
-    else
-        if (verbose > 0) fprintf(stderr, "[M::%s] right: none\n", __func__);
+    if (verbose > 0) {
+        if (max3 > 0)
+            fprintf(stderr, "[M::%s] right: count[%d] = %ld\n", __func__, max3_i, (long)cnt[max3_i]);
+        else
+            fprintf(stderr, "[M::%s] right: none\n", __func__);
+    }
     if (max3_i > 0) {
         *peak_het = max_i;
         return max3_i;

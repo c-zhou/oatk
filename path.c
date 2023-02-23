@@ -2206,7 +2206,9 @@ void asg_print_fa(asg_t *g, FILE *fo, int line_wd)
         if (g->seg[i].seq == 0)
             fprintf(stderr, "[W::%s] skip empty sequence: %s\n", __func__, g->seg[i].name);
         fprintf(fo, ">%s\n", g->seg[i].name);
+        l = 0;
         put_chars(g->seg[i].seq, g->seg[i].len, 0, 0, fo, &l, line_wd);
+        if (l % line_wd != 0) fputc('\n', fo);
     }
 }
 

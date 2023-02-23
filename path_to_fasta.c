@@ -92,7 +92,7 @@ int main(int argc, char *argv[])
     }
     
     if (argc == opt.ind || fp_help == stdout) {
-        fprintf(fp_help, "Usage: path_to_fasta [options] file[.gfa[.gz]] [path_str]\n");
+        fprintf(fp_help, "Usage: path_to_fasta [options] <file>[.gfa[.gz]] [path_str]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -p STR        two-column path file\n");
         fprintf(fp_help, "    -s STR        output sequence id\n");

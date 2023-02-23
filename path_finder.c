@@ -517,6 +517,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                         __func__, asg->seg[component->v[0]].name);
             // FIXME sequences removed by graph clean are not included
             asg_print_fa(asg, out_utg, 60);
+            kv_push(uint32_t, sub_v, component->v[0]);
         } else {
             uint32_t b, is_circ;
             double f;
@@ -723,7 +724,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
-        fprintf(fp_help, "Usage: path_finder [options] file[.gfa[.gz]]\n");
+        fprintf(fp_help, "Usage: path_finder [options] <file>[.gfa[.gz]] [path_str]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "  Input/Output:\n");
         fprintf(fp_help, "    -m FILE              mitochondria core gene annotation file [NULL]\n");
@@ -820,8 +821,8 @@ int main(int argc, char *argv[])
     if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
 
     // graph will be changed with extra copies of sequences added
-    parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf, do_graph_clean, out_pref, out_s, OG_MITO);
-    parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf, do_graph_clean, out_pref, out_s, OG_PLTD);
+    if (mito_annot) parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf, do_graph_clean, out_pref, out_s, OG_MITO);
+    if (pltd_annot) parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf, do_graph_clean, out_pref, out_s, OG_PLTD);
     
     if (ret) {
         fprintf(stderr, "[E::%s] failed to analysis the GFA file\n", __func__);
