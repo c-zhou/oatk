@@ -32,6 +32,7 @@
 #define __MISC_UTILITY_H__
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 extern double realtime0;
 
@@ -67,6 +68,11 @@ double realtime(void);
 void liftrlimit(void);
 void sys_init(void);
 void sleep_ms(int ms);
+void check_executable(char *exe);
+int run_system_cmd(char *cmd, int retry);
+char *make_tempfile(char *temp_dir, char *file_template, const char *suffix);
+FILE *open_outstream(char *prefix, char *suffix);
+void parse_pathname(char *path, char **_dirname, char **_basename);
 #ifdef __cplusplus
 }
 #endif

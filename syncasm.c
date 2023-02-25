@@ -71,6 +71,7 @@ KHASHL_SET_INIT(KH_LOCAL, ks_u128_t, ks_u128, uint128_t, kh_hash_uint128, kh_eq_
 
 static void scg_destroy_scm(scg_t *g)
 {
+    if (!g) return;
     if (!g->scm) return;
     size_t i;
     for (i = 0; i < g->n_scm; ++i) {
@@ -89,6 +90,21 @@ void scg_destroy(scg_t *g)
     if (g->scm_u) free(g->scm_u);
     if (g->idx_u) free(g->idx_u);
     free(g);
+}
+
+void scg_meta_clean(scg_meta_t *meta)
+{
+    if (!meta) return;
+    scg_destroy(meta->scg);
+    sr_v_destroy(meta->sr);
+    scg_ra_v_destroy(meta->ra);
+}
+
+void scg_meta_destroy(scg_meta_t *meta)
+{
+    if (!meta) return;
+    scg_meta_clean(meta);
+    free(meta);
 }
 
 typedef struct {uint128_t h; uint64_t s; uint64_t m_pos;} syncmer1_t;
@@ -562,7 +578,7 @@ static int calc_syncmer_overlap(sr_v *sr, syncmer_t *m1, uint64_t rc1, syncmer_t
                 // this should never happen
                 // for checking only
                 fprintf(stderr, "[W::%s] multiple syncmer order found: %s ", __func__, sr->a[r1].sname);
-                print_seq(&sr->a[r1], stderr);
+                print_hoco_seq(&sr->a[r1], stderr);
                 fprintf(stderr, "[W::%s] == %lu %lu %u\n", __func__, r1, i1, sr->a[r1].m_pos[i1]>>1);
                 for (i = p2; i < n2; ++i) {
                     r2 = pos2[i]>>25;

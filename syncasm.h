@@ -77,6 +77,12 @@ typedef struct {
 
 typedef struct {size_t n, m; scg_ra_t *a;} scg_ra_v;
 
+typedef struct {
+    scg_t *scg;
+    sr_v *sr;
+    scg_ra_v *ra;
+} scg_meta_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -97,6 +103,9 @@ void scg_ra_v_destroy(scg_ra_v *ra_v);
 void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int for_unzip);
 void scg_ra_print(scg_ra_t *ra, FILE *fo);
 void scg_rv_print(scg_ra_v *rv, FILE *fo);
+void scg_meta_clean(scg_meta_t *meta);
+void scg_meta_destroy(scg_meta_t *meta);
+
 #ifdef __cplusplus
 }
 #endif

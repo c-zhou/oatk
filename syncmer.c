@@ -965,6 +965,7 @@ void sr_destroy(sr_t *sr)
 
 void sr_v_destroy(sr_v *sr_v)
 {
+    if (!sr_v) return;
     size_t i;
     for (i = 0; i < sr_v->n; ++i)
         sr_destroy(&sr_v->a[i]);
@@ -1040,7 +1041,7 @@ void print_all_syncmers_on_seq(sr_t *sr, int k, int w, FILE *fo)
     for (i = 0; i < sr->n; ++i) print_syncmer_on_seq(sr, i, k, w, fo);
 }
 
-void print_seq(sr_t *sr, FILE *fo)
+void print_hoco_seq(sr_t *sr, FILE *fo)
 {
     uint32_t i;
     for (i = 0; i < sr->hoco_l; ++i) fputc(char_nt4_table[(sr->hoco_s[i/4]>>(((i&3)^3)<<1)) & 3], fo);

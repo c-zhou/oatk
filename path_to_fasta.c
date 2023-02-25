@@ -45,8 +45,9 @@ int VERBOSE = 0;
 double realtime0;
 
 static ko_longopt_t long_options[] = {
-    { "linear",  ko_no_argument, 300 },
+    { "linear",  ko_no_argument, 301 },
     { "version", ko_no_argument, 'V' },
+    { "help",    ko_no_argument, 'h' },
     { 0, 0, 0 }
 };
 
@@ -69,7 +70,7 @@ int main(int argc, char *argv[])
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 's') seq_id = opt.arg;
         else if (c == 'p') path_file = opt.arg;
-        else if (c == 300) force_linear = 1;
+        else if (c == 301) force_linear = 1;
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'o') {
@@ -100,6 +101,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -v INT        verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --linear      force linear output\n");
         fprintf(fp_help, "    --version     show version number\n");
+        fprintf(fp_help, "Example: ./path_to_fasta asm.gfa u1+,u2-,u3-,u2+\n");
         return fp_help == stdout? 0 : 1;
     }
 
@@ -196,7 +198,7 @@ int main(int argc, char *argv[])
     }
 
     if (fflush(stdout) == EOF) {
-        perror("[E::%s] failed to write the results");
+        fprintf(stderr, "[E::%s] failed to write the results\n", __func__);
         exit(EXIT_FAILURE);
     }
 

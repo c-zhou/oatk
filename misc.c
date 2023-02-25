@@ -28,6 +28,12 @@
  *                                                                               *
  *********************************************************************************/
 #include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
+#include <errno.h>
+
+#include "misc.h"
 
 double realtime0;
 
@@ -183,5 +189,100 @@ void sleep_ms(int milliseconds) {
         sleep(milliseconds / 1000);
     usleep((milliseconds % 1000) * 1000);
 #endif
+}
+
+char *make_tempfile(char *temp_dir, char *file_template, const char *suffix)
+{
+    sprintf(file_template, "%s/tmpXXXXXXXXXX%s", temp_dir, suffix);
+    int ret = mkstemps(file_template, strlen(suffix));
+    if (ret >= 0) {
+        // need to close the file descriptor
+        close(ret);
+        return strdup(file_template);
+    }
+    return 0;
+}
+
+int run_system_cmd(char *cmd, int retry)
+{
+    int exit_code = system(cmd);
+    --retry;
+    if ((exit_code != -1 && !WEXITSTATUS(exit_code)) || !retry)
+        return exit_code;
+    return run_system_cmd(cmd, retry);
+}
+
+void check_executable(char *exe)
+{
+    char cmd[4096];
+    sprintf(cmd, "%s -h >/dev/null 2>&1", exe);
+
+    int exit_code = run_system_cmd(cmd, 1);
+    if (exit_code == -1 || WEXITSTATUS(exit_code)) {
+        fprintf(stderr, "[E::%s] executable %s is not available\n", __func__, exe);
+        exit(EXIT_FAILURE);
+    }
+}
+
+FILE *open_outstream(char *prefix, char *suffix)
+{
+    FILE *fo;
+    char *out;
+
+    MYMALLOC(out, strlen(prefix) + strlen(suffix) + 1);
+    sprintf(out, "%s%s", prefix, suffix);
+    fo = fopen(out, "w");
+    if (!fo) {
+        fprintf(stderr, "[E::%s] failed to open file '%s' to write: %s\n", __func__, out, strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    free(out);
+
+    return fo;
+}
+
+void parse_pathname(char *path, char **_dirname, char **_basename)
+{
+    if (_dirname) *_dirname = 0;
+    if (_basename) *_basename = 0;
+    if (path == 0) return;
+    int len, i, n_token;
+    len = strlen(path);
+    if (len == 0) return;
+    if (path[len-1] == '/') {
+        if (_dirname) *_dirname = strdup(path);
+        return;
+    }
+    char *dirname, *basename, *token;
+    dirname = strdup(path);
+    token = strtok(dirname, "/");
+    n_token = 0;
+    do {
+        ++n_token;
+        basename = token;
+        token = strtok(NULL, "/");
+    } while (token);
+    // necessary for duplicate '/'
+    for (i = 0; i < len; ++i)
+        if (dirname[i] == '/')
+            dirname[i] = 0;
+    len = basename - dirname - 1;
+    for (i = 0; i < len; ++i)
+        if (!dirname[i])
+            dirname[i] = '/';
+    if (dirname != basename) {
+        if (_dirname) *_dirname = len? dirname : strdup("/");
+        if (_basename) *_basename = basename;
+    } else {
+        if ((strlen(basename)==1 && basename[0] == '.') ||
+                (strlen(basename)==2 && 
+                 basename[0] == '.' && basename[1] == '.')) {
+            if (_dirname) *_dirname = dirname;
+        } else {
+            if (_dirname) *_dirname = strdup(".");
+            if (_basename) *_basename = basename;
+        }
+    }
+    return;
 }
 

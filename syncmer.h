@@ -97,7 +97,7 @@ extern "C" {
 void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, int n_threads);
 void print_syncmer_on_seq(sr_t *sr, uint32_t n, int k, int w, FILE *fo);
 void print_all_syncmers_on_seq(sr_t *sr, int k, int w, FILE *fo);
-void print_seq(sr_t *sr, FILE *fo);
+void print_hoco_seq(sr_t *sr, FILE *fo);
 void sr_stat(sr_v *sr, sr_stat_t *stats, int w, FILE *fo, int more);
 void sr_destroy(sr_t *sr);
 void sr_v_destroy(sr_v *sr_v);

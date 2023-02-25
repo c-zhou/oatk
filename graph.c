@@ -587,7 +587,7 @@ uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, 
  ******************/
 
 // in a resolved bubble, mark unused vertices and arcs as "reduced"
-static void asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, asmg_tbuf_t *b)
+static void asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, int protect_super_bubble, asmg_tbuf_t *b)
 {
     uint64_t i, v, w;
     asmg_arc_t *a;
@@ -598,6 +598,15 @@ static void asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, asmg_tb
         v = b->v_sink;
         do { ++n_kept, v = b->a[v].p; } while (v != v0);
         if (b->b.n > n_kept + max_del) return;
+    }
+    if (protect_super_bubble) {
+        uint64_t n_kept, b_kept, b_tot;
+        n_kept = b_kept = 0;
+        v = b->v_sink;
+        do { ++n_kept, b_kept += g->vtx[v>>1].len, v = b->a[v].p; } while (v != v0);
+        b_tot = 0;
+        for (i = 0; i < b->b.n; ++i) b_tot += g->vtx[b->b.a[i]>>1].len;
+        if ((b_tot - b_kept) * 2 > (g->vtx[v0>>1].len + g->vtx[b->v_sink>>1].len) * (b->b.n - n_kept)) return;
     }
     for (i = 0; i < b->b.n; ++i)
         g->vtx[b->b.a[i]>>1].del = 1;
@@ -624,24 +633,15 @@ static uint64_t asmg_bub_pop1(asmg_t *g, uint64_t v0, uint64_t radius, uint64_t 
     if (asmg_arc_n1(g, v0) < 2) return 0; // no bubbles
     asmg_topo_ext(g, v0, g->vtx[v0>>1].len + radius, protect_tip? 0 : ASMG_TE_THRU_SHORT_TIP, b);
     if (b->n_sink) {
-        int do_backtrack = 1;
-        if (protect_super_bubble > 0) {
-            uint64_t d = b->dist > g->vtx[v0>>1].len? (b->dist - g->vtx[v0>>1].len) : 0;
-            if (d >= (uint32_t) protect_super_bubble && 
-                    (d >= g->vtx[v0>>1].len || d >= g->vtx[b->v_sink>>1].len))
-                do_backtrack = 0;
-        }
-        if (do_backtrack) {
-            asmg_bub_backtrack(g, v0, max_del, b);
-            ret = 1 | (uint64_t) b->n_short_tip << 32;
-        }
+        asmg_bub_backtrack(g, v0, max_del, protect_super_bubble, b);
+        ret = 1 | (uint64_t) b->n_short_tip << 32;
     }
     asmg_tbuf_reset(b);
     return ret;
 }
 
 // pop bubbles
-// super bubble: the source-sink distance is greater than source or sink sequence length
+// super bubble: the average length of sequences to be removed is greater than the average length of source and sink sequence
 // super buubles are protected with protect_super_bubble set
 uint64_t asmg_pop_bubble(asmg_t *g, uint64_t radius, uint64_t max_del, int protect_tip, int protect_super_bubble, int do_cleanup, int VERBOSE)
 {

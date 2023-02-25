@@ -176,3 +176,8 @@ void hmm_annot_print(hmm_annot_t *hmm_annot, size_t n, FILE *fo)
     }
 }
 
+int is_trn(hmm_annot_t *annot)
+{
+    return !strncmp(annot->gname, "trn", 3);
+}
+

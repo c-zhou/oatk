@@ -47,6 +47,13 @@ extern char TAG_ARC_COV[4]; // arc coverage
 extern char TAG_SEQ_COV[4]; // seq coverage
 extern char TAG_SBP_COV[4]; // seq total base coverage
 
+// if the graph size is larger than COMMON_MAX_PLTD_SIZE, the sequence is likely mito
+// size will only include one copy of IR
+extern uint32_t COMMON_MAX_PLTD_SIZE; // 200000
+extern uint32_t COMMON_MIN_PLTD_SIZE; //  80000
+// pltd to mito score fold threshold to mark graph as plat without considering other conditions
+extern double PLTD_TO_MITO_FST; // 5.0
+
 typedef struct {
     char *name; // seq id
     char *seq; // sequence
@@ -75,6 +82,19 @@ typedef struct {
 } path_t;
 
 typedef struct {size_t n, m; path_t *a;} path_v;
+
+typedef struct {
+    uint8_t type; // og type
+    double score; // annotation score (top 'n_core' genes for each seg)
+    double sscore; // secondary annotation score
+    uint32_t len; // total length of segs
+    uint32_t nv; // number of segs
+    uint32_t *v; // seg ids
+    uint32_t ng; // number of genes (controlled by 'no_trn', 'max_eval')
+    uint64_t *g; // sorted list of genes (best hit) gid << 32 | score
+} og_component_t;
+
+typedef struct {size_t n, m; og_component_t *a; } og_component_v;
 
 #ifdef __cplusplus
 extern "C" {
@@ -105,6 +125,14 @@ uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq
 void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int line_wd);
 void print_all_best_seqs(asg_t *g, path_v *paths, FILE *fo);
 int is_valid_gfa_tag(const char *tag);
+double sequence_covered_by_path(asg_t *asg, path_t *path, uint32_t len);
+int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, int verbose);
+
+void og_component_destroy(og_component_t *og_component);
+void og_component_v_destroy(og_component_v *component_v);
+og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
+        double max_eval, int n_core, int min_len, int min_score, int verbose);
+void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components, FILE *fo);
 
 #ifdef __cplusplus
 }

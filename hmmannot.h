@@ -27,8 +27,8 @@
  * 04/08/22 - Chenxi Zhou: Created                                               *
  *                                                                               *
  *********************************************************************************/
-#ifndef __ANNOTATION_H__
-#define __ANNOTATION_H__
+#ifndef __HMMANNOT_H__
+#define __HMMANNOT_H__
 
 #include <stdint.h>
 #include <stdio.h>
@@ -59,6 +59,7 @@ extern "C" {
 void hmm_annot_destroy(hmm_annot_t *hmm_annot);
 void hmm_annot_v_destroy(hmm_annot_v *annot_v);
 hmm_annot_v *hmm_annot_read(char *annot_file, hmm_annot_v *annot_v, uint8_t og_type);
+int is_trn(hmm_annot_t *annot);
 void hmm_annot_index(hmm_annot_v *annot_v);
 uint32_t hmm_annot_name2id(hmm_annot_v *annot_v, char *gname);
 void hmm_annot_print(hmm_annot_t *hmm_annot, size_t n, FILE *fo);

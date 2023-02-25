@@ -55,6 +55,7 @@ KHASHL_MAP_INIT(KH_LOCAL, kh_128_t, kh_128, uint128_t, uint64_t, kh_hash_uint128
 
 void scg_ra_v_destroy(scg_ra_v *ra_v)
 {
+    if (!ra_v) return;
     size_t i;
     for (i = 0; i < ra_v->n; ++i)
         free(ra_v->a[i].a);

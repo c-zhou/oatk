@@ -29,39 +29,20 @@
  *********************************************************************************/
 #include <stdlib.h>
 #include <stdint.h>
-#include <unistd.h>
-#include <assert.h>
 #include <stdio.h>
 #include <zlib.h>
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <errno.h>
-
-#include <dirent.h>
+#include <assert.h>
 
 #include "kthread.h"
 #include "kvec.h"
 #include "kseq.h"
-#include "ketopt.h"
 
 #include "misc.h"
 
 #define HMMANNOTATION_VERSION "0.1"
 
-int VERBOSE = 0;
-double realtime0;
-
 KSTREAM_INIT(gzFile, gzread, 65536)
-
-typedef struct {
-    int32_t seq_id; // seq_id << 1 | rev
-    uint8_t hmm_id;
-    int ali_from, ali_to;
-    double e_value;
-    double score;
-} annot_hmm_t;
-
-typedef struct { size_t n, m; annot_hmm_t *a; } annot_hmm_v;
 
 /***************************
  * Run nhmmscan annotation *
@@ -122,39 +103,6 @@ static inline int parse_gseq(char *s, char **seg, char **seq)
     if (**seq == '*') return 6;
 
     return 0;
-}
-
-static inline char *make_tempfile(char *temp_dir, char *file_template, const char *suffix)
-{
-    sprintf(file_template, "%s/tmpXXXXXXXXXX%s", temp_dir, suffix);
-    int ret = mkstemps(file_template, strlen(suffix));
-    if (ret >= 0) {
-        // need to close the file descriptor
-        close(ret);
-        return strdup(file_template);
-    }
-    return 0;
-}
-
-static int run_system_cmd(char *cmd, int retry)
-{
-    int exit_code = system(cmd);
-    --retry;
-    if ((exit_code != -1 && !WEXITSTATUS(exit_code)) || !retry)
-        return exit_code;
-    return run_system_cmd(cmd, retry);
-}
-
-static void check_executable(char *exe)
-{
-    char cmd[4096];
-    sprintf(cmd, "%s -h >/dev/null 2>&1", exe);
-    
-    int exit_code = run_system_cmd(cmd, 1);
-    if (exit_code == -1 || WEXITSTATUS(exit_code)) {
-        fprintf(stderr, "[E::%s] executable %s is not available\n", __func__, exe);
-        exit(EXIT_FAILURE);
-    }
 }
 
 static void annot_worker_for(void *_data, long i, int tid) // kt_for() callback
@@ -301,7 +249,7 @@ static void *annot_worker_pipeline(void *shared, int step, void *in)
         } else {
             annot_s->batch_num = batch_num;
             annot_s->shared = p;
-            fprintf(stderr, "[E::%s] %u sequences (%u bp) loaded in %u batc%s\n", __func__, n_seq, l_seq, batch_num, batch_num > 1? "hes" : "h");
+            fprintf(stderr, "[M::%s] %u sequences (%u bp) loaded in %u batc%s\n", __func__, n_seq, l_seq, batch_num, batch_num > 1? "hes" : "h");
             return annot_s;
         }
     } else if (step == 1) { // do nhmmscan annotation
@@ -381,9 +329,17 @@ int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE 
     return 0;
 }
 
+#ifdef ANNOTATION_MAIN
+#include "ketopt.h"
+
+int VERBOSE = 0;
+double realtime0;
+
 static ko_longopt_t long_options[] = {
-    { "nhmmscan", ko_required_argument, 300 },
+    { "nhmmscan", ko_required_argument, 301 },
+    { "threads",  ko_required_argument, 't' },
     { "version",  ko_no_argument,       'V' },
+    { "help",     ko_no_argument,       'h' },
     { 0, 0, 0 }
 };
 
@@ -392,7 +348,7 @@ int main(int argc, char *argv[])
     const char *opt_str = "t:b:T:o:Vv:h";
     ketopt_t opt = KETOPT_INIT;
     int c, ret = 0;
-    int n_threads, batch_size;
+    int n_threads, batch_size, n_file;
     FILE *fp_help, *out_fp;
     char *out, *nhmmdb, *tmpdir;
     char **file_in;
@@ -403,6 +359,7 @@ int main(int argc, char *argv[])
     out_fp = stdout;
     out = nhmmdb = tmpdir = 0;
     file_in = 0;
+    n_file = 0;
     batch_size = 1000000;
     n_threads = 4;
     char *nhmmscan = "nhmmscan";
@@ -411,7 +368,7 @@ int main(int argc, char *argv[])
         if (c == 't') n_threads = atoi(opt.arg);
         else if (c == 'b') batch_size = atoi(opt.arg);
         else if (c == 'T') tmpdir = opt.arg;
-        else if (c == 300) nhmmscan = opt.arg;
+        else if (c == 301) nhmmscan = opt.arg;
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'o') {
@@ -440,9 +397,10 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -t INT           number threads [4]\n");
         fprintf(fp_help, "    -T STR           temporary directory [NULL]\n");
         fprintf(fp_help, "    -o FILE          output results to FILE [stdout]\n");
-        fprintf(fp_help, "    --nhmmscan STR   nhmmscan executable path [nhmmscan]\n");
+        fprintf(fp_help, "    --nhmmscan STR   nhmmscan executable path [%s]\n", nhmmscan);
         fprintf(fp_help, "    -v INT           verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --version        show version number\n");
+        fprintf(fp_help, "Example: ./hmm_annotation -t 8 --nhmmscan /usr/bin/nhmmscan -o asm_annot.mito.txt angiosperm_mito.fam asm.gfa\n");
         return fp_help == stdout? 0 : 1;
     }
 
@@ -458,14 +416,15 @@ int main(int argc, char *argv[])
         return 1;
     } else {
         file_in = argv + opt.ind + 1;
+        n_file = argc - opt.ind - 1;
     }
 
-    // check nhmmscan executable is avaiable
+    // check if nhmmscan executable is available
     check_executable(nhmmscan);
 
     if (out) out_fp = fopen(out, "w");
 
-    ret = hmm_annotate(file_in, 1, nhmmscan, nhmmdb, out_fp, batch_size, n_threads * 5, n_threads, tmpdir);
+    ret = hmm_annotate(file_in, n_file, nhmmscan, nhmmdb, out_fp, batch_size, n_threads * 5, n_threads, tmpdir);
 
     if (out) fclose(out_fp);
 
@@ -475,7 +434,7 @@ int main(int argc, char *argv[])
     }
 
     if (fflush(stdout) == EOF) {
-        perror("[E::%s] failed to write the results");
+        fprintf(stderr, "[E::%s] failed to write the results\n", __func__);
         exit(EXIT_FAILURE);
     }
 
@@ -490,4 +449,5 @@ int main(int argc, char *argv[])
 
     return 0;
 }
+#endif
 
