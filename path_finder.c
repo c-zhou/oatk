@@ -34,12 +34,16 @@
 
 #include "kvec.h"
 #include "khashl.h"
+#include "kthread.h"
 
 #include "path.h"
 #include "graph.h"
+#include "syncasm.h"
 #include "hmmannot.h"
 
 #define PATHFINDER_VERSION "0.1"
+
+#undef DEBUG_MINICIRCLE_REPEAT_UNIT
 
 char TAG_ARC_COV[4]; // arc coverage
 char TAG_SEQ_COV[4]; // seq coverage
@@ -51,30 +55,30 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
         int max_copy, int min_ex_g, uint32_t max_d_len, double seq_cf, int do_clean, int bubble_size, 
         int tip_size, double weak_cross, char *out_pref, int out_opt, uint8_t og_type, int VERBOSE)
 {
-    assert(og_type == OG_MITO || og_type == OG_PLTD);
+    assert(og_type == OG_MITO || og_type == OG_PLTD || og_type == OG_MINI);
 
     FILE *out_stats, *out_seq, *out_utg, *out_gfa;
     char *m_str;
     MYMALLOC(m_str, strlen(out_pref) + 64);
-    sprintf(m_str, "%s.%s.stats", out_pref, og_type==OG_MITO? "mito" : "pltd");
+    sprintf(m_str, "%s.%s.stats", out_pref, OG_TYPES[og_type]);
     out_stats = fopen(m_str, "w");
     if (!out_stats) {
         fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
         exit(EXIT_FAILURE);
     }
-    sprintf(m_str, "%s.%s.fasta", out_pref, og_type==OG_MITO? "mito" : "pltd");
+    sprintf(m_str, "%s.%s.fasta", out_pref, OG_TYPES[og_type]);
     out_seq = fopen(m_str, "w");
     if (!out_seq) {
         fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
         exit(EXIT_FAILURE);
     }
-    sprintf(m_str, "%s.%s.unassembled.fasta", out_pref, og_type==OG_MITO? "mito" : "pltd");
+    sprintf(m_str, "%s.%s.unassembled.fasta", out_pref, OG_TYPES[og_type]);
     out_utg = fopen(m_str, "w");
     if (!out_utg) {
         fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
         exit(EXIT_FAILURE);
     }
-    sprintf(m_str, "%s.%s.gfa", out_pref, og_type==OG_MITO? "mito" : "pltd");
+    sprintf(m_str, "%s.%s.gfa", out_pref, OG_TYPES[og_type]);
     out_gfa = fopen(m_str, "w");
     if (!out_gfa) {
         fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
@@ -102,7 +106,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
         if (VERBOSE > 0)
             fprintf(stderr, "[M::%s] processing subgraph seeding from %s: "
                     "type, %s; score, %.1f; sscore, %.1f; len, %u; nv, %u; ng, %u\n", 
-                    __func__, asg->seg[component->v[0]].name, component->type==OG_MITO? "mito" : "pltd", 
+                    __func__, asg->seg[component->v[0]].name, OG_TYPES[component->type], 
                     component->score, component->sscore, component->len, component->nv, component->ng);
         
         // find number of extra genes would be added
@@ -124,7 +128,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
         }
 
         // processing the subgraph
-        asg_subgraph(asg, component->v, 1, 0);
+        asg_subgraph(asg, component->v, 1, 0, 0);
         
         if (VERBOSE > 1) {
             if (VERBOSE > 2) {
@@ -289,7 +293,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
     // extract and output organelle gfa components
     if (sub_v.n > 0) {
         // in subgraph all vtx and arcs deleted during expansion are back
-        asg_subgraph(asg, sub_v.a, sub_v.n, 0);
+        asg_subgraph(asg, sub_v.a, sub_v.n, 0, 0);
         asg_print(asg, out_gfa, 0);
     }
     kv_destroy(sub_v);
@@ -298,6 +302,217 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
     fclose(out_seq);
     fclose(out_utg);
     fclose(out_gfa);
+}
+
+typedef struct {
+    scg_ra_v *ra;
+    uint64_t sid;
+    uint64_t *mcs; // beg<<33|end<<1|rev end is inclusive
+} mc_shared_t;
+
+static void minicircle_analysis_thread(void *_data, long i, int tid) // kt_for() callback
+{
+    uint32_t j, k, beg, end, rev, nfrg;
+    uint64_t sid, uid;
+    scg_ra_t *ra;
+    ra_frg_t *frgs;
+    
+    ra = &(((mc_shared_t *)_data)->ra->a[i]);
+    sid = ((mc_shared_t *)_data)->sid;
+    nfrg = ra->n;
+    frgs = ra->a;
+
+    if (nfrg < 2) {
+        ((mc_shared_t *)_data)->mcs[i] = UINT64_MAX;
+        return;
+    }
+
+    // find begin and end position
+    beg = end = rev = UINT32_MAX;
+    for (j = 0; j < nfrg; ++j) {
+        uid = frgs[j].uid;
+        if (uid>>1 != sid)
+            continue;
+        if (beg == UINT32_MAX)
+            beg = j;
+        else if (end == UINT32_MAX)
+            end = j - 1;
+        if (rev == UINT32_MAX) {
+            rev = uid & 1;
+        } else if (rev != (uid & 1)) {
+            // inconsistent alignment orientation found
+            rev = UINT32_MAX;
+            break;
+        }
+    }
+
+    if (beg == UINT32_MAX || end == UINT32_MAX || rev == UINT32_MAX) {
+        // either no repeat unit or inconsistent orientation
+        ((mc_shared_t *)_data)->mcs[i] = UINT64_MAX;
+        return;
+    }
+    
+    // check repeat unit consistency across the entire alignment path
+    int valid = 1;
+    if (beg > 0 || end < nfrg - 2) {
+        uint32_t r = end - beg;
+        if (beg > r) {
+            valid = 0;
+        } else {
+            k = r - beg;
+            if (++k > r) k = 0;
+            for (j = 0; j < nfrg; ++j) {
+                if (frgs[j].uid != frgs[beg+k].uid) {
+                    valid = 0;
+                    break;
+                }
+                if (++k > r) k = 0;
+            }
+        }
+    }
+
+    ((mc_shared_t *)_data)->mcs[i] = valid? ((uint64_t) beg<<33 | (uint64_t) end<<1 | rev) : UINT64_MAX;
+}
+
+static int extract_minicircles_with_anchor(scg_ra_v *ra, uint64_t anchor_sid, int n_threads)
+{
+    uint64_t i, j, nr, *mcs;
+    
+    nr = ra->n;
+    MYMALLOC(mcs, nr);
+    mc_shared_t mc_shared = {ra, anchor_sid, mcs};
+    kt_for(n_threads, minicircle_analysis_thread, &mc_shared, nr);
+
+#ifdef DEBUG_MINICIRCLE_REPEAT_UNIT
+    scg_rv_print(ra, stderr);
+    for (i = 0; i < nr; ++i) {
+        if (mcs[i] == UINT64_MAX) continue;
+        scg_ra_print(&ra->a[i], stderr);
+        fprintf(stderr, "[DEBUG_MINICIRCLE_REPEAT_UNIT::%s] repeat unit: beg %lu; end %u; %c\n", __func__, 
+                mcs[i]>>33, (uint32_t) (mcs[i]>>1), "+-"[mcs[i]&1]);
+    }
+#endif
+
+    free(mcs);
+
+    return 0;
+}
+
+static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components,
+        double *seg_annot_score, scg_meta_t *scg_meta, int n_threads, int VERBOSE)
+{
+    if (og_components->n == 0) {
+        if (VERBOSE > 0)
+            fprintf(stderr, "[M::%s] no OG component found\n", __func__);
+        return 1;
+    }
+
+    uint32_t i, anchor_sid;
+    uint64_t n_seg;
+    double max_s;
+    og_component_t *component;
+    asmg_t *asmg;
+
+    n_seg = asg->n_seg;
+    asmg = scg_meta->scg->utg_asmg;
+
+    // find the anchor sequence in the first og component
+    component = &og_components->a[0];
+    if (component->type != OG_MINI)
+        return 1;
+    
+    max_s = .0;
+    anchor_sid = 0;
+    for (i = 0; i < component->nv; ++i) {
+        uint32_t sid = component->v[i];
+        double s = seg_annot_score[sid*4+OG_MINI];
+        if (s > max_s) {
+            max_s = s;
+            anchor_sid = sid;
+        }
+    }
+
+    if (VERBOSE > 0)
+        fprintf(stderr, "[M::%s] anchor sequence found: %s [len %u; score, %.3f]\n", __func__,
+                asg->seg[anchor_sid].name, asg->seg[anchor_sid].len, max_s);
+
+    assert(n_seg == asmg->n_vtx);
+    for (i = 0; i < n_seg; ++i)
+        assert(asg->seg[i].len == asmg->vtx[i].len);
+
+    // check if circular path existed
+    int path_exists;
+    uint32_t step;
+    uint64_t dist;
+    path_exists = asmg_path_exists(asmg, anchor_sid<<1, anchor_sid<<1, 0, COMMON_MAX_MINICIRCLE_SIZE, &step, &dist);
+    if (VERBOSE > 0)
+        fprintf(stderr, "[M::%s] circlar path %s found between anchor sequence in the original assembly graph: r=%u, d=%lu\n",
+                __func__, path_exists? "WAS" : "NOT", step, dist);
+    if (!path_exists) {
+        // path_exists = extend_and_assemble_from_anchor_sequence();
+        if (VERBOSE > 0)
+            fprintf(stderr, "[M::%s] circlar path %s found between anchor sequence in the reassembled graph\n",
+                    __func__, path_exists? "WAS" : "NOT");
+    }
+
+    if (!path_exists) return 1;
+
+    // align reads and find minicircles
+    asmg_clean_consensus(scg_meta->scg->utg_asmg);
+    scg_read_alignment(scg_meta->sr, scg_meta->ra, scg_meta->scg, n_threads, 0);
+    extract_minicircles_with_anchor(scg_meta->ra, anchor_sid, n_threads);
+
+    return 0;
+}
+
+int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int n_core, int min_len,
+        int min_ex_g, int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+        int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
+        int out_s, char *out_pref, int n_threads, int VERBOSE)
+{
+    asg_t *asg;
+    hmm_annot_v *annot_v;
+    og_component_v *og_components;
+    double *seg_annot_score;
+    int ret = 0;
+
+    asg = 0;
+    annot_v = 0;
+    og_components = 0;
+    seg_annot_score = 0;
+
+    annot_v = hmm_annot_read(mini_annot, annot_v, OG_MINI);
+    if (annot_v == 0) {
+        fprintf(stderr, "[E::%s] failed to read the annotation file\n", __func__);
+        ret = 1;
+        goto do_clean;
+    }
+    if (annot_v) hmm_annot_index(annot_v);
+    if (VERBOSE > 2) hmm_annot_print(annot_v->a, annot_v->n, stderr);
+
+    asg = asg_read(asg_file);
+    if (asg == 0) {
+        fprintf(stderr, "[E::%s] failed to read the graph: %s\n", __func__, asg_file);
+        ret = 1;
+        goto do_clean;
+    }
+
+    og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, &seg_annot_score, VERBOSE);
+    if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
+
+    parse_organelle_minicircle(asg, annot_v, og_components, seg_annot_score, scg_meta, n_threads, VERBOSE);
+
+    parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
+            do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_s, OG_MINI, VERBOSE);
+
+
+do_clean:
+    asg_destroy(asg);
+    hmm_annot_v_destroy(annot_v);
+    og_component_v_destroy(og_components);
+    free(seg_annot_score);
+
+    return ret;
 }
 
 int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, int min_len, int min_ex_g,
@@ -337,7 +552,7 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, i
 
     if (do_graph_clean && min_cf > .0) clean_graph_by_sequence_coverage(asg, min_cf, max_copy, VERBOSE);
 
-    og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, VERBOSE);
+    og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, 0, VERBOSE);
     if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
 
     // graph will be changed with extra copies of sequences added
@@ -466,7 +681,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
-        fprintf(fp_help, "Usage: path_finder [options] <file>[.gfa[.gz]] [path_str]\n");
+        fprintf(fp_help, "Usage: pathfinder [options] <file>[.gfa[.gz]] [path_str]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "  Input/Output:\n");
         fprintf(fp_help, "    -m FILE              mitochondria core gene annotation file [NULL]\n");
@@ -496,7 +711,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
         fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);
         fprintf(fp_help, "    --weak-cross FLOAT   maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
-        fprintf(fp_help, "Example: ./path_finder -m asm_annot.mito.txt -p asm_annot.pltd.txt -o oatk.asm asm.gfa\n");
+        fprintf(fp_help, "Example: ./pathfinder -m asm_annot.mito.txt -p asm_annot.pltd.txt -o oatk.asm asm.gfa\n");
         return fp_help == stdout? 0 : 1;
     }
 

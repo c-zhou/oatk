@@ -56,17 +56,17 @@
 #undef DEBUG_SIM_ANNEAL_OPTIM
 #undef DEBUG_PATH_FINDER
 
-const int athaliana_pltd_g71n = 71;
-const char *const athaliana_pltd_g71[] = {
-    "psbA",  "matK",  "rps16", "psbK",  "psbI", "atpA",  "atpF",  "atpH", "atpI",  "rps2",
-    "rpoC2", "rpoC1", "rpoB",  "ycf6",  "psbM", "psbD",  "psbC",  "ycf9", "rps14", "psaB",
-    "psaA",  "ycf3",  "rps4",  "ndhJ",  "psbG", "ndhC",  "atpE",  "atpB", "rbcL",  "accD",
-    "psaI",  "ycf4",  "cemA",  "petA",  "psbJ", "psbL",  "psbF",  "psbE", "ORF31", "petG",
-    "psaJ",  "rpl33", "rps18", "rpl20", "clpP", "psbB",  "psbT",  "psbN", "psbH",  "petB",
-    "petD",  "rpoA",  "rps11", "rpl36", "rps8", "rpl14", "rpl16", "rps3", "rpl22", "rps19",
-    "ndhF",  "rpl32", "ycf5",  "ndhD",  "psaC", "ndhE",  "ndhG",  "ndhI", "ndhA",  "ndhH",
-    "rps15"
-};
+// const int athaliana_pltd_g71n = 71;
+//const char *const athaliana_pltd_g71[] = {
+//    "psbA",  "matK",  "rps16", "psbK",  "psbI", "atpA",  "atpF",  "atpH", "atpI",  "rps2",
+//    "rpoC2", "rpoC1", "rpoB",  "ycf6",  "psbM", "psbD",  "psbC",  "ycf9", "rps14", "psaB",
+//    "psaA",  "ycf3",  "rps4",  "ndhJ",  "psbG", "ndhC",  "atpE",  "atpB", "rbcL",  "accD",
+//    "psaI",  "ycf4",  "cemA",  "petA",  "psbJ", "psbL",  "psbF",  "psbE", "ORF31", "petG",
+//    "psaJ",  "rpl33", "rps18", "rpl20", "clpP", "psbB",  "psbT",  "psbN", "psbH",  "petB",
+//    "petD",  "rpoA",  "rps11", "rpl36", "rps8", "rpl14", "rpl16", "rps3", "rpl22", "rps19",
+//    "ndhF",  "rpl32", "ycf5",  "ndhD",  "psaC", "ndhE",  "ndhG",  "ndhI", "ndhA",  "ndhH",
+//    "rps15"
+//};
 
 typedef struct list_node {
     uint32_t v; // sid << 31 | oriv
@@ -118,58 +118,11 @@ static int u64_cmpfunc(const void *a, const void *b)
     return (*(uint64_t *) a > *(uint64_t *) b) - (*(uint64_t *) a < *(uint64_t *) b);
 }
 
-KDQ_INIT(uint64_t)
-
-void asg_subgraph(asg_t *asg, uint32_t *seeds, uint32_t n, uint32_t step)
+void asg_subgraph(asg_t *asg, uint32_t *seeds, uint32_t n, uint32_t step, uint32_t dist)
 {
     // make a subgraph from given a vertex set and radius
     // all vertices and arcs in other components will be marked as deleted
-    if (n == 0) return;
-    
-    uint32_t i, v, r, nv;
-    uint64_t x;
-    int8_t *flag;
-    kdq_t(uint64_t) *q;
-    asmg_t *g;
-    asmg_arc_t *av;
-   
-    if (step == 0)
-        step = INT32_MAX;
-    g = asg->asmg;
-    q = kdq_init(uint64_t, 0);
-    MYCALLOC(flag, asmg_vtx_n(g));
-    for (i = 0; i < n; ++i) {
-        if (seeds[i] < g->n_vtx) {
-            kdq_push(uint64_t, q, ((uint64_t)seeds[i]<<1|0)<<32);
-            kdq_push(uint64_t, q, ((uint64_t)seeds[i]<<1|1)<<32);
-        }
-    }
-    for (i = 0; i < g->n_vtx; ++i) // mark all segments to be deleted
-        g->vtx[i].del = 1;
-    for (i = 0; i < g->n_arc; ++i) // mark all arcs to be deleted
-        g->arc[i].del = 1;
-    while (kdq_size(q) > 0) {
-        x = *kdq_shift(uint64_t, q);
-        v = x>>32;
-        r = (uint32_t) x;
-        if (flag[v]) continue; // already visited
-        flag[v] = 1;
-        g->vtx[v>>1].del = 0;
-        if (r < step) {
-            nv = asmg_arc_n(g, v);
-            av = asmg_arc_a(g, v);
-            for (i = 0; i < nv; ++i) {
-                av[i].del = 0;
-                if (flag[av[i].w] == 0)
-                    kdq_push(uint64_t, q, (uint64_t)av[i].w<<32 | (r + 1));
-                if (flag[av[i].w^1] == 0)
-                    kdq_push(uint64_t, q, (uint64_t)(av[i].w^1)<<32 | (r + 1));
-            }
-        }
-    }
-    
-    kdq_destroy(uint64_t, q);
-    free(flag);
+    asmg_subgraph(asg->asmg, seeds, n, step, dist);
 }
 
 static double graph_sequence_coverage_lower_bound(asg_t *asg, double cov_nq)
@@ -1265,7 +1218,7 @@ static double path_rotate_core(asg_t *g, path_t *path, hmm_annot_v *annots, uint
     // on segs included in the path
     for (i = 0; i < annots->n; ++i) {
         annot = &annots->a[i];
-        if ((annot->mito && og_type == OG_MITO) || (annot->pltd && og_type == OG_PLTD)) {
+        if (annot->og_type == og_type) {
             k = kh_str_get(gene_db, annot->gname);
             k1 = kh_s32_get(segs, asg_name2id(g, annot->sname)); // sid might not set
             if (k < kh_end(gene_db) && k1 < kh_end(segs) && kh_val(segs, k1) == 1) {
@@ -1741,7 +1694,7 @@ int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, in
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
         if (visited[i]) continue;
-        asg_subgraph(asg, &i, 1, 0);
+        asg_subgraph(asg, &i, 1, 0, 0);
         avg_cov = estimate_sequence_copy_number_from_coverage(asg, 0, max_copy);
         for (j = 0; j < n_seg; ++j) {
             if (g->vtx[j].del) continue;
@@ -2325,20 +2278,34 @@ void og_component_v_destroy(og_component_v *component_v)
     free(component_v);
 }
 
-// if the graph size is larger than COMMON_MAX_PLTD_SIZE, the sequence is likely mito
-// size will only include one copy of IR
-uint32_t COMMON_MAX_PLTD_SIZE = 200000;
-uint32_t COMMON_MIN_PLTD_SIZE =  80000;
-// pltd to mito score fold threshold to mark graph as plat without considering other conditions
-double PLTD_TO_MITO_FST = 5.0;
-
-og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
-        double max_eval, int n_core, int min_len, int min_score, int verbose)
+static uint32_t max2(double *a, uint32_t n, uint32_t *_smax)
 {
-    uint32_t i, j, k, n_seg, n_gene, sid, gid;
+    uint32_t i, imax, smax;
+    double max_a, smax_a;
+    imax = smax = 0;
+    max_a = smax_a = -DBL_MAX;
+    for (i = 0; i < n; ++i) {
+        if (a[i] > max_a) {
+            smax = imax;
+            smax_a = max_a;
+            imax = i;
+            max_a = a[i];
+        } else if (a[i] > smax_a) {
+            smax = i;
+            smax_a = a[i];
+        }
+    }
+    if (_smax) *_smax = smax;
+    return imax;
+}
+
+og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval, 
+        int n_core, int min_len, int min_score, double **_annot_score, int verbose)
+{
+    uint32_t i, j, k, n_seg, n_gene, sid, gid, imax, smax;
     hmm_annot_t *annots, *annot;
-    double m_score, p_score, *mito_score, *pltd_score;
-    int m_n, p_n, len;
+    double a_s[4], *annot_score;
+    int a_n[4], len, nv;
     uint8_t *visited, og_t;
     og_component_t *component;
     og_component_v *component_v;
@@ -2360,28 +2327,23 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
 
     // calculate annotation score for each seg
     sid = annots[0].sid;
-    m_score = p_score = .0;
-    m_n = p_n = 0;
-    MYCALLOC(mito_score, n_seg);
-    MYCALLOC(pltd_score, n_seg);
+    MYBZERO(a_s, 4);
+    MYBZERO(a_n, 4);
+    MYCALLOC(annot_score, n_seg * 4);
     for (i = 0; i < n_gene; ++i) {
         annot = &annots[i];
         if (annot->sid != sid) {
-            mito_score[sid] = m_score;
-            pltd_score[sid] = p_score;
+            memcpy(annot_score+sid*4, a_s, sizeof(double)*4);
             sid = annot->sid;
-            m_score = p_score = .0;
-            m_n = p_n = 0;
+            MYBZERO(a_s, 4);
+            MYBZERO(a_n, 4);
         }
         if (annot->evalue > max_eval || (no_trn && is_trn(annot)))
             continue;
-        if (annot->mito && m_n++ < n_core)
-            m_score += annot->score;
-        if (annot->pltd && p_n++ < n_core)
-            p_score += annot->score;
+        if (a_n[annot->og_type]++ < n_core)
+            a_s[annot->og_type] += annot->score;
     }
-    mito_score[sid] = m_score;
-    pltd_score[sid] = p_score;
+    memcpy(annot_score+sid*4, a_s, sizeof(double)*4);
 
     // extract each subgraph and do classification
     // TODO: deal with graphs when mito and pltd are in the same subgraph
@@ -2389,30 +2351,28 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
         if (visited[i]) continue;
-        asg_subgraph(asg, &i, 1, 0);
-        m_score = p_score = .0;
-        m_n = len = 0;
+        asg_subgraph(asg, &i, 1, 0, 0);
+        MYBZERO(a_s, 4);
+        len = nv = 0;
         for (j = 0; j < n_seg; ++j) {
             if (!g->vtx[j].del) {
-                m_score += mito_score[j];
-                p_score += pltd_score[j];
-                ++m_n;
+                for (k = 0; k < 4; ++k)
+                    a_s[k] += annot_score[j*4+k];
+                ++nv;
                 len += g->vtx[j].len;
                 visited[j] = 1;
             }
         }
-        og_t = 0;
-        if (len < min_len && m_score < min_score && p_score < min_score)
-            // mark as non-organelle sequence
-            og_t = OG_NONE;
-        else
-            // 1, mito; 2, pltd; 3, unclassified
-            og_t = m_score == p_score? OG_UNCLASSIFIED : (m_score > p_score? OG_MITO : OG_PLTD);
+        imax = max2(a_s, 4, &smax);
+        og_t = OG_UNCLASSIFIED;
+        if (len >= min_len || a_s[imax] >= min_score)
+            // 1, mito; 2, pltd; 3, mini
+            og_t = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
 
-        if (og_t == OG_MITO || og_t == OG_PLTD) {
+        if (og_t != OG_UNCLASSIFIED) {
             // make seg list
             uint32_t *comp_v;
-            MYMALLOC(comp_v, m_n);
+            MYMALLOC(comp_v, nv);
             k = 0;
             for (j = 0; j < n_seg; ++j)
                 if (!g->vtx[j].del)
@@ -2429,8 +2389,8 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
                     continue;
                 // gid:30 | OG_TYPE:2 | score:32
                 kv_push(uint64_t, comp_g,
-                        ((uint64_t) hmm_annot_name2id(annot_v, annot->gname) << 2 |
-                         (annot->mito? OG_MITO : OG_PLTD)) << 32 | (uint32_t) annot->score);
+                        ((uint64_t) hmm_annot_name2id(annot_v, annot->gname) << 2 | 
+                         annot->og_type) << 32 | (uint32_t) annot->score);
             }
             // sort by gid and then score - descending order
             qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
@@ -2449,22 +2409,25 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
             // add og_component
             kv_pushp(og_component_t, *component_v, &component);
             component->type = og_t;
-            component->score = m_score > p_score? m_score : p_score;
-            component->sscore = m_score < p_score? m_score : p_score;
+            component->score = a_s[imax];
+            component->sscore = a_s[smax];
             component->len = len;
-            component->nv = m_n;
+            component->nv = nv;
             component->v = comp_v;
             component->ng = comp_g.n;
             component->g = comp_g.a;
         }
 
         if (verbose > 0)
-            fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; classification, %d\n",
-                    __func__, asg->seg[i].name, m_n, len, m_score, p_score, og_t);
+            fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
+                    __func__, asg->seg[i].name, nv, len, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI], og_t);
     }
+    
     free(visited);
-    free(mito_score);
-    free(pltd_score);
+    if (_annot_score)
+        *_annot_score = annot_score;
+    else
+        free(annot_score);
 
     // TODO fix this by maybe improving the specificity of the HMM database
     // revisit to deal with mito misclassification
@@ -2516,7 +2479,7 @@ void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_compon
     for (i = 0; i < og_components->n; ++i) {
         component = &og_components->a[i];
         fprintf(fo, "[M::%s] OG component %u \n", __func__, i);
-        fprintf(fo, "[M::%s] OG component %u og_type: %s\n", __func__, i, component->type==OG_MITO? "mito" : "pltd");
+        fprintf(fo, "[M::%s] OG component %u og_type: %s\n", __func__, i, OG_TYPES[component->type]);
         fprintf(fo, "[M::%s] OG component %u og_score: %.1f\n", __func__, i, component->score);
         fprintf(fo, "[M::%s] OG component %u og_sscore: %.1f\n", __func__, i, component->sscore);
         fprintf(fo, "[M::%s] OG component %u og_len: %u\n", __func__, i, component->len);

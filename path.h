@@ -49,10 +49,12 @@ extern char TAG_SBP_COV[4]; // seq total base coverage
 
 // if the graph size is larger than COMMON_MAX_PLTD_SIZE, the sequence is likely mito
 // size will only include one copy of IR
-extern uint32_t COMMON_MAX_PLTD_SIZE; // 200000
-extern uint32_t COMMON_MIN_PLTD_SIZE; //  80000
+static const uint32_t COMMON_MAX_PLTD_SIZE = 200000;
+static const uint32_t COMMON_MIN_PLTD_SIZE =  80000;
 // pltd to mito score fold threshold to mark graph as plat without considering other conditions
-extern double PLTD_TO_MITO_FST; // 5.0
+static const double PLTD_TO_MITO_FST = 5.0;
+// common max size of minicircles
+static const uint32_t COMMON_MAX_MINICIRCLE_SIZE = 50000;
 
 typedef struct {
     char *name; // seq id
@@ -107,7 +109,7 @@ asg_t *asg_read(const char *fn);
 asg_t *asg_make_copy(asg_t *g);
 uint32_t asg_add_seg(asg_t *g, char *name, int allow_dups);
 uint32_t asg_add_seg1(asg_t *g, char *name, char *seq, uint32_t len, uint64_t cov, int allow_dups);
-void asg_subgraph(asg_t *asg, uint32_t *seeds, uint32_t n, uint32_t step);
+void asg_subgraph(asg_t *asg, uint32_t *seeds, uint32_t n, uint32_t step, uint32_t dist);
 void asg_stat(asg_t *asg, FILE *fo);
 void asg_print(asg_t *g, FILE *fo, int no_seq);
 void asg_print_fa(asg_t *g, FILE *fo, int line_wd);
@@ -130,8 +132,8 @@ int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, in
 
 void og_component_destroy(og_component_t *og_component);
 void og_component_v_destroy(og_component_v *component_v);
-og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
-        double max_eval, int n_core, int min_len, int min_score, int verbose);
+og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval, 
+        int n_core, int min_len, int min_score, double **_annot_score, int verbose);
 void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components, FILE *fo);
 
 #ifdef __cplusplus

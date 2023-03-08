@@ -84,6 +84,8 @@ asmg_t *asmg_unitigging(asmg_t *g);
 uint64_t asmg_drop_tip(asmg_t *g, int32_t tip_cnt, uint64_t tip_len, int do_cleanup, int VERBOSE);
 uint64_t asmg_pop_bubble(asmg_t *g, uint64_t radius, uint64_t max_del, int protect_tip, int protect_super_bubble, int do_cleanup, int VERBOSE);
 uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, int VERBOSE);
+void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64_t dist);
+int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, uint64_t dist, uint32_t *_step, uint64_t *_dist);
 #ifdef __cplusplus
 }
 #endif

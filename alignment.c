@@ -289,7 +289,7 @@ static void *scg_ra_analysis_thread(void *args)
         }
 
 #ifdef DEBUG_READ_ALIGNMENT
-        uint64_t dbg_nr = 303579; //866; //910584;
+        uint64_t dbg_nr = 23; //303579; //866; //910584;
         pthread_mutex_lock(&lock);
         if (sr->sid == dbg_nr) {
             fprintf(stderr, "[DEBUG_READ_ALIGNMENT::%s_%d] NO_READ: %lu\n", __func__, dat->tid, sr->sid);
@@ -309,7 +309,6 @@ static void *scg_ra_analysis_thread(void *args)
 
         // chaining
         m = frg_v.n;
-        max_score = 0;
         for (j = 0; j < m; ++j) {
             frg = &frg_v.a[j];
             p = frg->s_end;
@@ -357,9 +356,15 @@ static void *scg_ra_analysis_thread(void *args)
                 pthread_mutex_unlock(&lock);
 #endif
             }
+        }
+        
+        max_score = 0;
+        for (j = 0; j < m; ++j) {
+            frg = &frg_v.a[j];
             if (max_score < frg->score)
                 max_score = frg->score;
         }
+
 #ifdef DEBUG_READ_ALIGNMENT
         pthread_mutex_lock(&lock);
         if (sr->sid == dbg_nr) {

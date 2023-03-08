@@ -78,8 +78,10 @@ static int is_empty_line(char *line)
     return 0;
 }
 
-hmm_annot_v *hmm_annot_read(char *annot_file, hmm_annot_v *annot_v, uint8_t og_type) // og_type: OG_MITO or OG_PLTD
+hmm_annot_v *hmm_annot_read(char *annot_file, hmm_annot_v *annot_v, uint8_t og_type) // og_type: OG_MITO or OG_PLTD or OG_MINI
 {
+    if (!annot_file) return 0;
+
     FILE *fp;
     char *line = NULL;
     size_t ln = 0;
@@ -115,8 +117,7 @@ hmm_annot_v *hmm_annot_read(char *annot_file, hmm_annot_v *annot_v, uint8_t og_t
         annot->gname = strdup(gname);
         annot->sname = strdup(sname);
         annot->strand = strand[0]=='+'? 0 : 1;
-        annot->mito = og_type == OG_MITO;
-        annot->pltd = og_type == OG_PLTD;
+        annot->og_type = og_type;
     }
     
     if (line) free(line);

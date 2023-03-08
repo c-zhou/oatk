@@ -33,20 +33,31 @@
 #include <stdint.h>
 #include <stdio.h>
 
-extern const int athaliana_pltd_g71n;
-extern const char *const athaliana_pltd_g71[];
+static const int athaliana_pltd_g71n = 71;
+static const char *const athaliana_pltd_g71[] = {
+    "psbA",  "matK",  "rps16", "psbK",  "psbI", "atpA",  "atpF",  "atpH", "atpI",  "rps2",
+    "rpoC2", "rpoC1", "rpoB",  "ycf6",  "psbM", "psbD",  "psbC",  "ycf9", "rps14", "psaB",
+    "psaA",  "ycf3",  "rps4",  "ndhJ",  "psbG", "ndhC",  "atpE",  "atpB", "rbcL",  "accD",
+    "psaI",  "ycf4",  "cemA",  "petA",  "psbJ", "psbL",  "psbF",  "psbE", "ORF31", "petG",
+    "psaJ",  "rpl33", "rps18", "rpl20", "clpP", "psbB",  "psbT",  "psbN", "psbH",  "petB",
+    "petD",  "rpoA",  "rps11", "rpl36", "rps8", "rpl14", "rpl16", "rps3", "rpl22", "rps19",
+    "ndhF",  "rpl32", "ycf5",  "ndhD",  "psaC", "ndhE",  "ndhG",  "ndhI", "ndhA",  "ndhH",
+    "rps15"
+};
 
-#define OG_NONE 0
+#define OG_UNCLASSIFIED 0
 #define OG_MITO 1
 #define OG_PLTD 2
-#define OG_UNCLASSIFIED 3
+#define OG_MINI 3
+
+static const char *const OG_TYPES[] = {"unclassified", "mito", "pltd", "mini"};
 
 // flag bit
 typedef struct {
     char *gname, *sname;
     uint32_t hmmfrom, hmmto, alifrom, alito, envfrom, envto, modlen;
     double evalue, score, bias;
-    uint32_t gid:27, mito:1, pltd:1, trn:1, core:1, del:1;
+    uint32_t gid:27, og_type:2, trn:1, core:1, del:1;
     uint64_t sid:63, strand:1;
 } hmm_annot_t;
 

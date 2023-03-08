@@ -34,6 +34,7 @@
 #include <assert.h>
 
 #include "kvec.h"
+#include "kdq.h"
 
 #include "misc.h"
 #include "graph.h"
@@ -875,5 +876,134 @@ asmg_t *asmg_unitigging(asmg_t *g)
     asmg_finalize(utg_asmg, 1);
 
     return utg_asmg;
+}
+
+KDQ_INIT(uint64_t)
+
+void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64_t dist)
+{
+    // TODO dealing with graphs with deleted vertices and arcs
+    // make a subgraph from given a vertex set and radius
+    // all vertices and arcs in other components will be marked as deleted
+    if (n == 0) return;
+
+    uint32_t i, v, r, nv;
+    uint64_t x, rd;
+    int8_t *flag;
+    kdq_t(uint64_t) *q;
+    kdq_t(uint64_t) *d;
+    asmg_arc_t *av;
+
+    if (step == 0)
+        step = UINT32_MAX;
+    if (dist == 0)
+        dist = UINT64_MAX;
+    q = kdq_init(uint64_t, 0);
+    d = kdq_init(uint64_t, 0);
+    MYCALLOC(flag, asmg_vtx_n(g));
+    for (i = 0; i < n; ++i) {
+        if (seeds[i] < g->n_vtx) {
+            kdq_push(uint64_t, q, ((uint64_t)seeds[i]<<1|0)<<32);
+            kdq_push(uint64_t, d, 0);
+            kdq_push(uint64_t, q, ((uint64_t)seeds[i]<<1|1)<<32);
+            kdq_push(uint64_t, d, 0);
+        }
+    }
+    for (i = 0; i < g->n_vtx; ++i) // mark all segments to be deleted
+        g->vtx[i].del = 1;
+    for (i = 0; i < g->n_arc; ++i) // mark all arcs to be deleted
+        g->arc[i].del = 1;
+    while (kdq_size(q) > 0) {
+        x = *kdq_shift(uint64_t, q);
+        v = x>>32;
+        r = (uint32_t) x;
+        rd = *kdq_shift(uint64_t, d);
+        if (flag[v]) continue; // already visited
+        flag[v] = 1;
+        g->vtx[v>>1].del = 0;
+        if (r < step && rd < dist) {
+            nv = asmg_arc_n(g, v);
+            av = asmg_arc_a(g, v);
+            for (i = 0; i < nv; ++i) {
+                av[i].del = 0;
+                if (flag[av[i].w] == 0) {
+                    kdq_push(uint64_t, q, (uint64_t)av[i].w<<32 | (r + 1));
+                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
+                }
+                if (flag[av[i].w^1] == 0) {
+                    kdq_push(uint64_t, q, (uint64_t)(av[i].w^1)<<32 | (r + 1));
+                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
+                }
+            }
+        }
+    }
+    assert(kdq_size(d) == 0);
+
+    kdq_destroy(uint64_t, q);
+    kdq_destroy(uint64_t, d);
+    free(flag);
+}
+
+
+int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, uint64_t dist, uint32_t *_step, uint64_t *_dist)
+{
+    // TODO dealing with graphs with deleted vertices and arcs
+    // detect path between two vertices
+    if (source >= asmg_vtx_n(g) || sink >= asmg_vtx_n(g))
+        return 0;
+    
+    if (_step) *_step = 0;
+    if (_dist) *_dist = 0;
+
+    uint32_t i, v, r, nv;
+    uint64_t x, rd;
+    int8_t *flag;
+    kdq_t(uint64_t) *q;
+    kdq_t(uint64_t) *d;
+    asmg_arc_t *av;
+
+    int exists = 0;
+
+    if (step == 0)
+        step = UINT32_MAX;
+    if (dist == 0)
+        dist = UINT64_MAX;
+    q = kdq_init(uint64_t, 0);
+    d = kdq_init(uint64_t, 0);
+    MYCALLOC(flag, asmg_vtx_n(g));
+    kdq_push(uint64_t, q, (uint64_t)source<<32);
+    kdq_push(uint64_t, d, 0);
+    while (kdq_size(q) > 0) {
+        x = *kdq_shift(uint64_t, q);
+        v = x>>32;
+        r = (uint32_t) x;
+        rd = *kdq_shift(uint64_t, d);
+        if (flag[v]) continue; // already visited
+        flag[v] = 1;
+        if (r < step && rd < dist) {
+            nv = asmg_arc_n(g, v);
+            av = asmg_arc_a(g, v);
+            for (i = 0; i < nv; ++i) {
+                if (av[i].w == sink) {
+                    exists = 1;
+                    if (_step) *_step = r;
+                    if (_dist) *_dist = rd;
+                    goto do_clean;
+                }
+                if (flag[av[i].w] == 0) {
+                    kdq_push(uint64_t, q, (uint64_t)av[i].w<<32 | (r + 1));
+                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
+                }
+            }
+        }
+    }
+    assert(kdq_size(d) == 0);
+
+do_clean:
+    kdq_destroy(uint64_t, q);
+    kdq_destroy(uint64_t, d);
+    free(flag);
+
+    return exists;
 }
 

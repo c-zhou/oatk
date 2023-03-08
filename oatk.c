@@ -60,6 +60,11 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, i
         int max_copy, double max_eval, double min_score, double min_cf, double seq_cf, int no_trn, int do_graph_clean, 
         int bubble_size, int tip_size, double weak_cross, int out_s, char *out_pref, int VERBOSE);
 
+int pathfinder_minicircle(char *asg_file, char *mito_annot, scg_meta_t *scg_meta, int n_core, int min_len,
+        int min_ex_g, int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+        int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
+        int out_s, char *out_pref, int n_threads, int VERBOSE);
+
 static int make_dir(char *dir)
 {
     struct stat st = {0};
@@ -137,7 +142,7 @@ int main(int argc, char *argv[])
     batch_size = 1000000;
     nhmmscan = "nhmmscan";
     tmpdir = 0;
-    // path_finder parameters
+    // pathfinder parameters
     out_s = -1;
     out_c = 0;
     max_copy = 10;
@@ -254,6 +259,11 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
+    if (mini_circle) {
+        fprintf(stderr, "[E::%s] mini-circle mode is still under development\n", __func__);
+        exit(EXIT_FAILURE);
+    }
+
     if (mini_circle && n_db > 1) {
         fprintf(stderr, "[E::%s] only one HMM profile database (-m or -p) allowed for mini-circle mode\n", __func__);
         exit(EXIT_FAILURE);
@@ -328,7 +338,9 @@ int main(int argc, char *argv[])
     
     /*** pathfinder ***/
     if (mini_circle) // pathfinder in mini-circle mode
-        return 1;
+        ret = pathfinder_minicircle(asg_file, mito_db? mito_annot : pltd_annot, scg_meta, n_core, min_len, min_ex_g,
+                max_d_len, max_copy, max_eval, min_score, min_cf, seq_cf, no_trn, do_graph_clean, bubble_size, 
+                tip_size, weak_cross, out_s, outpref, n_threads, VERBOSE);
     else // pathfinder in normal mode
         ret = pathfinder(asg_file, mito_annot, pltd_annot, n_core, min_len, min_ex_g, max_d_len, max_copy,
                 max_eval, min_score, min_cf, seq_cf, no_trn, do_graph_clean, bubble_size, tip_size, weak_cross,

@@ -1,14 +1,14 @@
 # Oatk: an organelle genome assembly toolkit [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7631376.svg)](https://doi.org/10.5281/zenodo.7631376)
 
 ## Overview
-Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. The toolkit consists of three major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmm_annotation` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `path_finder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure.
+Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. The toolkit consists of three major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmm_annotation` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `pathfinder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure. `oatk` is a wrapper for running `syncasm`, `hmm_annotation` and `path_finder` collectively.
 
 ## Installation
 You need to have a C compiler, GNU make and zlib development files installed. Download the source code from this repo or with `git clone https://github.com/c-zhou/oatk.git`. Then type `make` in the source code directory to compile.
 
 ## Run Oatk
 
-A typical run consists of three steps: HiFi read assembly with `syncasm`, HMM annotation with `hmm_annotation` and organelle genome extraction with `path_finder`.
+A typical run consists of three steps: HiFi read assembly with `syncasm`, HMM annotation with `hmm_annotation` and organelle genome extraction with `pathfinder`. You can run three components separately as detailed below. Alternatively, `oatk` provides a wrapper to run them in a more compact way.
 
 ### HiFi read assembly
 
@@ -51,9 +51,9 @@ The second positional parameter specifies the file of sequences for annotation. 
 
 ### Organelle genome extraction
 
-Here is an example to run `path_finder`,
+Here is an example to run `pathfinder`,
 
-    path_finder -m oatk_utg_final.mito.txt -p oatk_utg_final.pltd.txt -o oatk oatk_utg_final.gfa
+    pathfinder -m oatk_utg_final.mito.txt -p oatk_utg_final.pltd.txt -o oatk oatk_utg_final.gfa
     
 Three optional and one positional parameters are set in this example:
 
@@ -66,6 +66,14 @@ Three optional and one positional parameters are set in this example:
 The positional parameter specifies the assembly graph file.
 
 The major output files in this example include: `oatk.mito.fasta` and `oatk.mito.gfa` for mitochondrial genome assembly; and `oatk.pltd.fasta` and `oatk.pltd.gfa` for chloroplast genome assembly. If the assembly is too complicated to solve, there will also be `oatk.mito.unassembled.fasta` and `oatk.pltd.unassembled.fasta` for the unitigs.
+
+### Use oatk wrapper
+
+There above three steps can be alternatively run with the `oatk` wrapper as,
+
+    oatk -k 1001 -c 150 -t 8 --nhmmscan /usr/bin/nhmmscan -m $hmm_db_dir/angiosperm_mito.fam -p $hmm_db_dir/angiosperm_pltd.fam -o oatk $input_hifi
+
+The major output files are similar.
 
 ## Other auxiliary tools
 
