@@ -512,7 +512,7 @@ void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int f
         dat[i].old_ra = old_ra + i * b;
         MYCALLOC(dat[i].ra_v, 1);
         dat[i].g = g;
-        if (sr->n > (i + 1) * b) {
+        if (sr->n >= (i + 1) * b) {
             dat[i].n = b;
         } else {
             dat[i].n = sr->n - i * b;
