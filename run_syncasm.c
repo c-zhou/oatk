@@ -40,8 +40,7 @@
 #include "syncasm.h"
 #include "syncmer.h"
 #include "graph.h"
-
-#define SYNCASM_VERSION "0.1"
+#include "version.h"
 
 #undef DEBUG_SYNCMER_SEQ
 #undef DEBUG_SYNCMER_GRAPH
@@ -192,6 +191,8 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
 do_clean:
     if (meta) {
         scg_meta_clean(meta);
+        meta->k = k;
+        meta->s = s;
         meta->scg = scg;
         meta->sr = sr;
         meta->ra = ra;

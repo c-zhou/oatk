@@ -78,6 +78,7 @@ typedef struct {
 typedef struct {size_t n, m; scg_ra_t *a;} scg_ra_v;
 
 typedef struct {
+    int k, s;
     scg_t *scg;
     sr_v *sr;
     scg_ra_v *ra;

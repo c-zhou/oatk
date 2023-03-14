@@ -44,8 +44,7 @@
 #include "graph.h"
 #include "syncasm.h"
 #include "hmmannot.h"
-
-#define OATK_VERSION "0.1"
+#include "version.h"
 
 int VERBOSE = 0;
 double realtime0;
@@ -58,12 +57,12 @@ int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE 
 
 int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, int min_len, int min_ex_g, int max_d_len,
         int max_copy, double max_eval, double min_score, double min_cf, double seq_cf, int no_trn, int do_graph_clean, 
-        int bubble_size, int tip_size, double weak_cross, int out_s, char *out_pref, int VERBOSE);
+        int bubble_size, int tip_size, double weak_cross, int out_opt, char *out_pref, int VERBOSE);
 
 int pathfinder_minicircle(char *asg_file, char *mito_annot, scg_meta_t *scg_meta, int n_core, int min_len,
         int min_ex_g, int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
-        int out_s, char *out_pref, int n_threads, int VERBOSE);
+        int out_opt, char *out_pref, int n_threads, int VERBOSE);
 
 static int make_dir(char *dir)
 {
@@ -148,7 +147,7 @@ int main(int argc, char *argv[])
     max_copy = 10;
     no_trn = 1;
     do_graph_clean = 1;
-    n_core = 10;
+    n_core = 0;
     max_eval = 1e-12;
     min_len = 10000;
     min_score = 100;
@@ -260,8 +259,8 @@ int main(int argc, char *argv[])
     }
 
     if (mini_circle) {
-        fprintf(stderr, "[E::%s] mini-circle mode is still under development\n", __func__);
-        exit(EXIT_FAILURE);
+        fprintf(stderr, "[W::%s] mini-circle mode is still under development\n", __func__);
+        // exit(EXIT_FAILURE);
     }
 
     if (mini_circle && n_db > 1) {

@@ -39,8 +39,7 @@
 #include "kseq.h"
 
 #include "misc.h"
-
-#define HMMANNOTATION_VERSION "0.1"
+#include "version.h"
 
 KSTREAM_INIT(gzFile, gzread, 65536)
 

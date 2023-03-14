@@ -28,8 +28,8 @@ syncasm: run_syncasm.c syncasm.c syncmer.c graph.c alignment.c sstream.c cov.c m
 hmm_annotation: hmm_annotation.c hmmannot.c misc.c kalloc.c kthread.c
 		$(CC) $(CFLAGS) -DANNOTATION_MAIN hmm_annotation.c hmmannot.c misc.c kalloc.c kthread.c -o $@ -L. $(LIBS) $(INCLUDES)
 
-pathfinder: path_finder.c path.c graph.c hmmannot.c alignment.c misc.c kalloc.c kopen.c kthread.c
-		$(CC) $(CFLAGS) -DPATHFINDER_MAIN path_finder.c path.c graph.c hmmannot.c alignment.c misc.c kalloc.c kopen.c kthread.c -o $@ -L. $(LIBS) $(INCLUDES)
+pathfinder: path_finder.c syncasm.c syncmer.c path.c graph.c hmmannot.c alignment.c sstream.c misc.c MurmurHash3.c kalloc.c kopen.c kthread.c
+		$(CC) $(CFLAGS) -DPATHFINDER_MAIN path_finder.c syncasm.c syncmer.c path.c graph.c hmmannot.c alignment.c sstream.c misc.c MurmurHash3.c kalloc.c kopen.c kthread.c -o $@ -L. $(LIBS) $(INCLUDES)
 
 path_to_fasta: path_to_fasta.c path.c graph.c hmmannot.c misc.c kalloc.c kopen.c
 		$(CC) $(CFLAGS) path_to_fasta.c path.c graph.c hmmannot.c misc.c kalloc.c kopen.c -o $@ -L. $(LIBS) $(INCLUDES)

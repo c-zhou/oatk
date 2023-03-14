@@ -56,18 +56,6 @@
 #undef DEBUG_SIM_ANNEAL_OPTIM
 #undef DEBUG_PATH_FINDER
 
-// const int athaliana_pltd_g71n = 71;
-//const char *const athaliana_pltd_g71[] = {
-//    "psbA",  "matK",  "rps16", "psbK",  "psbI", "atpA",  "atpF",  "atpH", "atpI",  "rps2",
-//    "rpoC2", "rpoC1", "rpoB",  "ycf6",  "psbM", "psbD",  "psbC",  "ycf9", "rps14", "psaB",
-//    "psaA",  "ycf3",  "rps4",  "ndhJ",  "psbG", "ndhC",  "atpE",  "atpB", "rbcL",  "accD",
-//    "psaI",  "ycf4",  "cemA",  "petA",  "psbJ", "psbL",  "psbF",  "psbE", "ORF31", "petG",
-//    "psaJ",  "rpl33", "rps18", "rpl20", "clpP", "psbB",  "psbT",  "psbN", "psbH",  "petB",
-//    "petD",  "rpoA",  "rps11", "rpl36", "rps8", "rpl14", "rpl16", "rps3", "rpl22", "rps19",
-//    "ndhF",  "rpl32", "ycf5",  "ndhD",  "psaC", "ndhE",  "ndhG",  "ndhI", "ndhA",  "ndhH",
-//    "rps15"
-//};
-
 typedef struct list_node {
     uint32_t v; // sid << 31 | oriv
     struct list_node *prev;
@@ -2222,7 +2210,7 @@ void asg_print(asg_t *g, FILE *fo, int no_seq)
 
 void asg_print_fa(asg_t *g, FILE *fo, int line_wd)
 {
-    uint64_t i, l = 0;
+    uint64_t i, l;
     for (i = 0; i < g->n_seg; ++i) {
         if (g->asmg && g->asmg->vtx[i].del)
             continue;
@@ -2239,15 +2227,20 @@ void asg_print_fa(asg_t *g, FILE *fo, int line_wd)
  * Assembly Graph Annotation *
  * ***************************/
 
+// annotations comparison function sid - og_type - gid - score
 static int annot_cmpfunc_s(const void *a, const void *b)
 {
     hmm_annot_t *x, *y;
     x = (hmm_annot_t *) a;
     y = (hmm_annot_t *) b;
 
-    return x->sid != y->sid?
-        (x->sid > y->sid) - (x->sid < y->sid) :
-        (x->score < y->score) - (x->score > y->score);
+    if (x->sid != y->sid)
+        return (x->sid > y->sid) - (x->sid < y->sid);
+    if (x->og_type != y->og_type)
+        return (x->og_type > y->og_type) - (x->og_type < y->og_type);
+    if (x->gid != y->gid)
+        return (x->gid > y->gid) - (x->gid < y->gid);
+    return (x->score < y->score) - (x->score > y->score);
 }
 
 static int og_cmpfunc_r(const void *a, const void *b)
@@ -2260,6 +2253,12 @@ static int u64_cmpfunc_r(const void *a, const void *b)
 {
     return (*(uint64_t *) a < *(uint64_t *) b) - (*(uint64_t *) a > *(uint64_t *) b);
 }
+
+static int dbl_cmpfunc_r(const void *a, const void *b)
+{
+    return (*(double *) a < *(double *) b) - (*(double *) a > *(double *) b);
+}
+
 
 void og_component_destroy(og_component_t *og_component)
 {
@@ -2299,7 +2298,249 @@ static uint32_t max2(double *a, uint32_t n, uint32_t *_smax)
     return imax;
 }
 
+static void fix_og_misclassification(og_component_v *component_v)
+{
+    // TODO fix this by maybe improving the specificity of the HMM database
+    // revisit to deal with mito misclassification
+    // find the best pltd component
+    uint32_t i, p_b, p_b1;
+    double p_s, p_s1;
+    og_component_t *component;
+
+    p_b = p_b1 = UINT32_MAX;
+    p_s = p_s1 = 0;
+    for (i = 0; i < component_v->n; ++i) {
+        component = &component_v->a[i];
+        if (component->type != OG_PLTD)
+            continue;
+        if (component->score > p_s && component->len >= COMMON_MIN_PLTD_SIZE) {
+            if (component->len <= COMMON_MAX_PLTD_SIZE) {
+                p_b = i;
+                p_s = component->score;
+            }
+            p_b1 = i;
+            p_s1 = component->score;
+        }
+    }
+    if (p_b == UINT32_MAX) p_b = p_b1;
+    if (p_b != UINT32_MAX) {
+        // PLTD is likely there
+        for (i = 0; i < component_v->n; ++i) {
+            if (i == p_b) continue;
+            component = &component_v->a[i];
+            if (component->type != OG_PLTD)
+                continue;
+            if (component->score < component->sscore * PLTD_TO_MITO_FST ||
+                    component->len > COMMON_MAX_PLTD_SIZE) {
+                component->type = OG_MITO;
+                double tmp = component->score;
+                component->score = component->sscore;
+                component->sscore = tmp;
+            }
+        }
+    }
+}
+
+// this collects top n_core unique genes from each subgraph and calculates total scores
+// TODO consider the bias introduced by assembly graph size such as nuclear regions with numts
 og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval, 
+        int n_core, int min_len, int min_score, double **_annot_score, int verbose)
+{
+    uint32_t i, j, k, n, m, n_seg, n_gene, m_gene, sid, gid, imax, smax;
+    uint64_t *gene_idx;
+    hmm_annot_t *annots, *annot;
+    double a_s[4], *annot_score;
+    int len, nv;
+    uint8_t *visited, og_t;
+    og_component_t *component;
+    og_component_v *component_v;
+    asmg_t *g;
+
+    g = asg->asmg;
+    n_gene = annot_v->n;
+    annots = annot_v->a;
+    n_seg = asg->n_seg;
+
+    if (n_gene == 0) return 0;
+    if (n_core == 0) n_core = INT_MAX;
+
+    m_gene = 0;
+    for (i = 0; i < n_gene; ++i) {
+        // set seg id in case not set yet
+        annots[i].sid = asg_name2id(asg, annots[i].sname);
+        if (annots[i].gid > m_gene)
+            m_gene = annots[i].gid;
+    }
+    m_gene += 1; // m_gene is the max number of unique genes
+
+    // sort annotations by sid - og_type - gid - score
+    qsort(annots, n_gene, sizeof(hmm_annot_t), annot_cmpfunc_s);
+    
+    // index annotation for fast access to gene list of seqs
+    MYCALLOC(gene_idx, n_seg);
+    sid = annots[0].sid;
+    for (i = 1, j = 0; i < n_gene; ++i) {
+        if (sid != annots[i].sid) {
+            gene_idx[sid] = (uint64_t) j << 32 | (i - j);
+            j = i;
+            sid = annots[i].sid;
+        }
+    }
+    gene_idx[sid] = (uint64_t) j << 32 | (i - j);
+    
+    // extract each subgraph and do classification
+    // TODO deal with graphs when mito and pltd are in the same subgraph
+    MYMALLOC(annot_score, m_gene * 4);
+    MYCALLOC(component_v, 1);
+    MYCALLOC(visited, n_seg);
+    for (i = 0; i < n_seg; ++i) {
+        if (visited[i]) continue;
+        asg_subgraph(asg, &i, 1, 0, 0);
+        MYBZERO(annot_score, m_gene * 4);
+        len = nv = 0;
+        for (j = 0; j < n_seg; ++j) {
+            if (!g->vtx[j].del) {
+                m = (uint32_t) (gene_idx[j] >> 32);
+                n = (uint32_t) gene_idx[j];
+                if (n > 0) {
+                    for (k = 0; k < n; ++k) {
+                        annot = &annots[m + k];
+                        if (annot->evalue > max_eval ||
+                                (no_trn && is_trn(annot)))
+                            continue;
+                        gid = annot->og_type * m_gene + annot->gid;
+                        if (annot_score[gid] < annot->score)
+                            annot_score[gid] = annot->score;
+                    }
+                }
+                ++nv;
+                len += g->vtx[j].len;
+                visited[j] = 1;
+            }
+        }
+
+        // sort annotation scores for each og_type
+        // and get the sum annotation score
+        MYBZERO(a_s, 4);
+        for (j = 0; j < 4; ++j) {
+            qsort(&annot_score[j * m_gene], m_gene, sizeof(double), dbl_cmpfunc_r);
+            n = MIN((uint32_t) n_core, m_gene);
+            for (k = 0 ; k < n; ++k)
+                a_s[j] += annot_score[j * m_gene + k];
+        }
+        
+        imax = max2(a_s, 4, &smax);
+        og_t = OG_UNCLASSIFIED;
+        if (len >= min_len || a_s[imax] >= min_score)
+            // 1, mito; 2, pltd; 3, mini
+            og_t = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
+
+        if (og_t != OG_UNCLASSIFIED) {
+            // make seg list
+            uint32_t *comp_v;
+            MYMALLOC(comp_v, nv);
+            k = 0;
+            for (j = 0; j < n_seg; ++j)
+                if (!g->vtx[j].del)
+                    comp_v[k++] = j;
+            // make gene list
+            // get all genes in the component
+            kvec_t(uint64_t) comp_g;
+            kv_init(comp_g);
+            for (j = 0; j < n_gene; ++j) {
+                annot = &annots[j];
+                if (g->vtx[annot->sid].del ||
+                        annot->evalue > max_eval ||
+                        (no_trn && is_trn(annot)))
+                    continue;
+                // gid:30 | OG_TYPE:2 | score:32
+                kv_push(uint64_t, comp_g,
+                        ((uint64_t) annot->gid << 2 | annot->og_type) << 32 | 
+                        (uint32_t) annot->score);
+            }
+            // sort by gid and then score - descending order
+            qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
+            // keep only the best hit for each gene
+            k = 0;
+            gid = UINT32_MAX;
+            for (j = 0; j < comp_g.n; ++j) {
+                if (comp_g.a[j] >> 32 != gid) {
+                    comp_g.a[k++] = comp_g.a[j];
+                    gid = comp_g.a[j] >> 32;
+                }
+            }
+            comp_g.n = comp_g.m = k;
+            MYREALLOC(comp_g.a, k);
+
+            // add og_component
+            kv_pushp(og_component_t, *component_v, &component);
+            component->type = og_t;
+            component->score = a_s[imax];
+            component->sscore = a_s[smax];
+            component->len = len;
+            component->nv = nv;
+            component->v = comp_v;
+            component->ng = comp_g.n;
+            component->g = comp_g.a;
+        }
+
+        if (verbose > 0)
+            fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
+                    __func__, asg->seg[i].name, nv, len, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI], og_t);
+    }
+    
+    if (_annot_score) {
+        MYCALLOC(*_annot_score, n_seg * 4);
+
+        // calculate annotation score for each seg
+        // reuse annot_score
+        for (i = 0; i < n_seg; ++i) {
+            m = (uint32_t) (gene_idx[i] >> 32);
+            n = (uint32_t) gene_idx[i];
+            if (n == 0) continue;
+
+            MYBZERO(annot_score, m_gene * 4);
+            for (j = 0; j < n; ++j) {
+                annot = &annots[m + j];
+                if (annot->evalue > max_eval ||
+                        (no_trn && is_trn(annot)))
+                    continue;
+                gid = annot->og_type * m_gene + annot->gid;
+                if (annot_score[gid] < annot->score)
+                    annot_score[gid] = annot->score;
+            }
+
+            // sort annotation scores for each og_type
+            // and get the sum annotation score
+            MYBZERO(a_s, 4);
+            for (j = 0; j < 4; ++j) {
+                qsort(&annot_score[j * m_gene], m_gene, sizeof(double), dbl_cmpfunc_r);
+                n = MIN((uint32_t) n_core, m_gene);
+                for (k = 0 ; k < n; ++k)
+                    a_s[j] += annot_score[j * m_gene + k];
+            }
+            
+            memcpy((*_annot_score)+i*4, a_s, sizeof(double)*4);
+        }
+    }
+
+    free(annot_score);
+    free(gene_idx);
+    free(visited);
+
+    fix_og_misclassification(component_v);
+
+    qsort(component_v->a, component_v->n, sizeof(og_component_t), og_cmpfunc_r);
+
+    return component_v;
+}
+
+
+// this collects top n_core genes from this sequence and calculates total scores for each subgraph
+// it might be biased when there are multiple copies of some genes
+// especially for subgraphs from repetitive regions
+// this function has been replaced by annot_seq_og_type
+og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval,
         int n_core, int min_len, int min_score, double **_annot_score, int verbose)
 {
     uint32_t i, j, k, n_seg, n_gene, sid, gid, imax, smax;
@@ -2318,7 +2559,7 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
 
     if (n_gene == 0) return 0;
 
-    // set seg id
+    // set seg id in case not set yet
     for (i = 0; i < n_gene; ++i)
         annots[i].sid = asg_name2id(asg, annots[i].sname);
 
@@ -2346,7 +2587,7 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
     memcpy(annot_score+sid*4, a_s, sizeof(double)*4);
 
     // extract each subgraph and do classification
-    // TODO: deal with graphs when mito and pltd are in the same subgraph
+    // TODO deal with graphs when mito and pltd are in the same subgraph
     MYCALLOC(component_v, 1);
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
@@ -2389,8 +2630,8 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
                     continue;
                 // gid:30 | OG_TYPE:2 | score:32
                 kv_push(uint64_t, comp_g,
-                        ((uint64_t) hmm_annot_name2id(annot_v, annot->gname) << 2 | 
-                         annot->og_type) << 32 | (uint32_t) annot->score);
+                        ((uint64_t) annot->gid << 2 | annot->og_type) << 32 | 
+                        (uint32_t) annot->score);
             }
             // sort by gid and then score - descending order
             qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
@@ -2429,43 +2670,7 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
     else
         free(annot_score);
 
-    // TODO fix this by maybe improving the specificity of the HMM database
-    // revisit to deal with mito misclassification
-    // find the best pltd component
-    uint32_t p_b, p_b1;
-    double p_s, p_s1;
-    p_b = p_b1 = UINT32_MAX;
-    p_s = p_s1 = 0;
-    for (i = 0; i < component_v->n; ++i) {
-        component = &component_v->a[i];
-        if (component->type != OG_PLTD)
-            continue;
-        if (component->score > p_s && component->len >= COMMON_MIN_PLTD_SIZE) {
-            if (component->len <= COMMON_MAX_PLTD_SIZE) {
-                p_b = i;
-                p_s = component->score;
-            }
-            p_b1 = i;
-            p_s1 = component->score;
-        }
-    }
-    if (p_b == UINT32_MAX) p_b = p_b1;
-    if (p_b != UINT32_MAX) {
-        // PLTD is likely there
-        for (i = 0; i < component_v->n; ++i) {
-            if (i == p_b) continue;
-            component = &component_v->a[i];
-            if (component->type != OG_PLTD)
-                continue;
-            if (component->score < component->sscore * PLTD_TO_MITO_FST ||
-                    component->len > COMMON_MAX_PLTD_SIZE) {
-                component->type = OG_MITO;
-                double tmp = component->score;
-                component->score = component->sscore;
-                component->sscore = tmp;
-            }
-        }
-    }
+    fix_og_misclassification(component_v);
 
     qsort(component_v->a, component_v->n, sizeof(og_component_t), og_cmpfunc_r);
 

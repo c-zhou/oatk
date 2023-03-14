@@ -40,8 +40,7 @@
 #include "graph.h"
 #include "syncasm.h"
 #include "hmmannot.h"
-
-#define PATHFINDER_VERSION "0.1"
+#include "version.h"
 
 #undef DEBUG_MINICIRCLE_REPEAT_UNIT
 
@@ -374,38 +373,166 @@ static void minicircle_analysis_thread(void *_data, long i, int tid) // kt_for()
     ((mc_shared_t *)_data)->mcs[i] = valid? ((uint64_t) beg<<33 | (uint64_t) end<<1 | rev) : UINT64_MAX;
 }
 
-static int extract_minicircles_with_anchor(scg_ra_v *ra, uint64_t anchor_sid, int n_threads)
+static inline void rev_array(uint32_t *arr, uint32_t n)
 {
-    uint64_t i, j, nr, *mcs;
+    uint32_t tmp, i, j;
+    if (n == 0) return;
+    for (i = 0, j = n - 1; i < j; ++i, --j) {
+        tmp = arr[i];
+        arr[i] = arr[j];
+        arr[j] = tmp;
+    }
+}
+
+static int path_cmpfunc(const void *a, const void *b)
+{
+    path_t *x, *y;
+    x = (path_t *) a;
+    y = (path_t *) b;
+    if (x->nv != y->nv)
+        return (x->nv > y->nv) - (x->nv < y->nv);
+
+    uint32_t i, nv, *vx, *vy;
+    nv = x->nv;
+    vx = x->v;
+    vy = y->v;
+
+    for (i = 0; i < nv; ++i)
+        if (vx[i] != vy[i])
+            return (vx[i] > vy[i]) - (vx[i] < vy[i]);
+
+    return 0;
+}
+
+static int extract_minicircles_with_anchor(scg_ra_v *ra, scg_t *scg, uint64_t anchor_sid, int n_threads, path_v *paths)
+{
+    uint64_t i, j, k, nr, *mcs;
     
     nr = ra->n;
     MYMALLOC(mcs, nr);
     mc_shared_t mc_shared = {ra, anchor_sid, mcs};
     kt_for(n_threads, minicircle_analysis_thread, &mc_shared, nr);
 
-#ifdef DEBUG_MINICIRCLE_REPEAT_UNIT
-    scg_rv_print(ra, stderr);
     for (i = 0; i < nr; ++i) {
         if (mcs[i] == UINT64_MAX) continue;
-        scg_ra_print(&ra->a[i], stderr);
+        scg_ra_t *r = &ra->a[i];
+#ifdef DEBUG_MINICIRCLE_REPEAT_UNIT
+        scg_ra_print(r, stderr);
         fprintf(stderr, "[DEBUG_MINICIRCLE_REPEAT_UNIT::%s] repeat unit: beg %lu; end %u; %c\n", __func__, 
                 mcs[i]>>33, (uint32_t) (mcs[i]>>1), "+-"[mcs[i]&1]);
-    }
 #endif
-
+        // collect paths
+        kvec_t(uint32_t) vt;
+        kv_init(vt);
+        uint32_t n;
+        for (j = (mcs[i]>>33), n = (uint32_t) (mcs[i]>>1); j <= n; ++j)
+            kv_push(uint32_t, vt, (uint32_t) (r->a[j].uid));
+        if (mcs[i]&1) {
+            // do reverse complement
+            rev_array(vt.a+1, vt.n-1);
+            for (j = 0; j < vt.n; ++j)
+                vt.a[j] ^= 1;
+        }
+    
+        path_t path = {0, vt.n, 1, 0, vt.a, 0, 0., 0.};
+        kv_push(path_t, *paths, path);
+    }
     free(mcs);
 
-    return 0;
+    if (paths->n == 0) return 0;
+
+    // sort paths and remove duplicates
+    qsort(paths->a, paths->n, sizeof(path_t), path_cmpfunc);
+    j = 0;
+    k = 1;
+    for (i = 1; i < paths->n; ++i) {
+        int c = path_cmpfunc(&paths->a[i], &paths->a[j]);
+        if (c == 0) {
+            free(paths->a[i].v);
+            --k;
+        } else {
+            if (k != i)
+                paths->a[k] = paths->a[i];
+            j = k;
+        }
+        ++k;
+    }
+    paths->n = k;
+
+    // now update path info
+    uint32_t nv, len, len1, cov, *vt;
+    double wlen;
+    asmg_t *g;
+    asmg_arc_t *a;
+    
+    g = scg->utg_asmg;
+    for (i = 0; i < paths->n; ++i) {
+        path_t *path = &paths->a[i];
+        nv = path->nv;
+        vt = path->v;
+        
+        a = asmg_arc1(g, vt[nv-1], vt[0]);
+        assert(!!a); // should always be a circle
+        len = g->vtx[vt[0]>>1].len;
+        cov = g->vtx[vt[0]>>1].cov;
+        wlen = (double) cov * len;
+        len -= a->lo, wlen -= cov * a->lo; // circular path
+        
+        for (j = 1; j < nv; ++j) {
+            len1 = g->vtx[vt[j]>>1].len;
+            cov = g->vtx[vt[j]>>1].cov;
+            len += len1;
+            wlen += (double) cov * len1;
+            a = asmg_arc1(g, vt[j-1], vt[j]);
+            assert(!!a);
+            len -= a->lo;
+            wlen -= (double) cov * a->lo;
+        }
+
+        path->len = len;
+        path->wlen = wlen;
+    }
+
+    return paths->n;
 }
 
 static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components,
-        double *seg_annot_score, scg_meta_t *scg_meta, int n_threads, int VERBOSE)
+        double *seg_annot_score, scg_meta_t *scg_meta, int n_threads, char *out_pref, int out_opt, double seq_cf, int VERBOSE)
 {
     if (og_components->n == 0) {
         if (VERBOSE > 0)
             fprintf(stderr, "[M::%s] no OG component found\n", __func__);
         return 1;
     }
+
+    FILE *out_stats, *out_seq, *out_utg, *out_gfa;
+    char *m_str;
+    MYMALLOC(m_str, strlen(out_pref) + 64);
+    sprintf(m_str, "%s.%s.stats", out_pref, OG_TYPES[OG_MINI]);
+    out_stats = fopen(m_str, "w");
+    if (!out_stats) {
+        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
+        exit(EXIT_FAILURE);
+    }
+    sprintf(m_str, "%s.%s.fasta", out_pref, OG_TYPES[OG_MINI]);
+    out_seq = fopen(m_str, "w");
+    if (!out_seq) {
+        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
+        exit(EXIT_FAILURE);
+    }
+    sprintf(m_str, "%s.%s.unassembled.fasta", out_pref, OG_TYPES[OG_MINI]);
+    out_utg = fopen(m_str, "w");
+    if (!out_utg) {
+        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
+        exit(EXIT_FAILURE);
+    }
+    sprintf(m_str, "%s.%s.gfa", out_pref, OG_TYPES[OG_MINI]);
+    out_gfa = fopen(m_str, "w");
+    if (!out_gfa) {
+        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
+        exit(EXIT_FAILURE);
+    }
+    free(m_str);
 
     uint32_t i, anchor_sid;
     uint64_t n_seg;
@@ -449,18 +576,59 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
         fprintf(stderr, "[M::%s] circlar path %s found between anchor sequence in the original assembly graph: r=%u, d=%lu\n",
                 __func__, path_exists? "WAS" : "NOT", step, dist);
     if (!path_exists) {
-        // path_exists = extend_and_assemble_from_anchor_sequence();
+        // WARN assembly graph and anchor sequence will be updated here
+        // remember to update asg
+        // path_exists = extend_and_assemble_from_anchor_sequence(scg_meta, asg, &anchor_sid);
         if (VERBOSE > 0)
             fprintf(stderr, "[M::%s] circlar path %s found between anchor sequence in the reassembled graph\n",
                     __func__, path_exists? "WAS" : "NOT");
     }
 
-    if (!path_exists) return 1;
+    path_v paths = {0, 0, 0};
 
-    // align reads and find minicircles
-    asmg_clean_consensus(scg_meta->scg->utg_asmg);
-    scg_read_alignment(scg_meta->sr, scg_meta->ra, scg_meta->scg, n_threads, 0);
-    extract_minicircles_with_anchor(scg_meta->ra, anchor_sid, n_threads);
+    if (path_exists) {
+        // align reads and find minicircles
+        asmg_clean_consensus(scg_meta->scg->utg_asmg);
+        scg_read_alignment(scg_meta->sr, scg_meta->ra, scg_meta->scg, n_threads, 0);
+
+#ifdef DEBUG_MINICIRCLE_REPEAT_UNIT
+        scg_rv_print(scg_meta->ra, stderr);
+#endif
+
+        scg_consensus(scg_meta->sr, scg_meta->scg, scg_meta->k, 0, 0);
+        extract_minicircles_with_anchor(scg_meta->ra, scg_meta->scg, anchor_sid, n_threads, &paths);
+    }
+
+    // prepare assembly subgraph for output
+    asmg_subgraph(asg->asmg, &anchor_sid, 1, 0, 0);
+
+    if (paths.n == 0) {
+        // not possible to solve the graph
+        // likely because the graph is not circularisable or too complicated
+        if (VERBOSE > 0)
+            fprintf(stderr, "[M::%s] subgraph seeding from %s is unresolvable, output unitigs as unassembled\n",
+                    __func__, asg->seg[anchor_sid].name);
+        // FIXME sequences removed by graph clean are not included
+        asg_print_fa(asg, out_utg, 60);
+    } else {
+        uint32_t b;
+        path_sort(&paths);
+        // TODO improve the selection criteria
+        b = select_best_seq(asg, &paths, 0, out_opt, seq_cf, 0, 0);
+        path_stats(asg, &paths, out_stats);
+        print_seq(asg, &paths.a[b], out_seq, 1, 0, 60);
+    }
+
+    asg_print(asg, out_gfa, 0);
+
+    for (i = 0; i < paths.n; ++i)
+        path_destroy(&paths.a[i]);
+    kv_destroy(paths);
+
+    fclose(out_stats);
+    fclose(out_seq);
+    fclose(out_utg);
+    fclose(out_gfa);
 
     return 0;
 }
@@ -468,7 +636,7 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
 int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int n_core, int min_len,
         int min_ex_g, int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
-        int out_s, char *out_pref, int n_threads, int VERBOSE)
+        int out_opt, char *out_pref, int n_threads, int VERBOSE)
 {
     asg_t *asg;
     hmm_annot_v *annot_v;
@@ -500,11 +668,7 @@ int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta
     og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, &seg_annot_score, VERBOSE);
     if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
 
-    parse_organelle_minicircle(asg, annot_v, og_components, seg_annot_score, scg_meta, n_threads, VERBOSE);
-
-    parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-            do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_s, OG_MINI, VERBOSE);
-
+    parse_organelle_minicircle(asg, annot_v, og_components, seg_annot_score, scg_meta, n_threads, out_pref, out_opt, seq_cf, VERBOSE);
 
 do_clean:
     asg_destroy(asg);
@@ -518,7 +682,7 @@ do_clean:
 int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, int min_len, int min_ex_g,
         int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
-        int out_s, char *out_pref, int VERBOSE)
+        int out_opt, char *out_pref, int VERBOSE)
 {
     asg_t *asg;
     hmm_annot_v *annot_v;
@@ -558,10 +722,10 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, i
     // graph will be changed with extra copies of sequences added
     if (mito_annot)
         parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-                do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_s, OG_MITO, VERBOSE);
+                do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
     if (pltd_annot)
         parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-                do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_s, OG_PLTD, VERBOSE);
+                do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
 
 do_clean:
     asg_destroy(asg);
@@ -631,7 +795,7 @@ int main(int argc, char *argv[])
     bubble_size = 100000;
     tip_size = 10000;
     weak_cross = 0.3;
-    n_core = 10;
+    n_core = 0;
     max_eval = 1e-12;
     min_len = 10000;
     min_score = 100;

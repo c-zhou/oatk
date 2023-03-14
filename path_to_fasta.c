@@ -36,8 +36,7 @@
 #include "kvec.h"
 #include "kseq.h"
 #include "path.h"
-
-#define PATHTOFASTA_VERSION "0.1"
+#include "version.h"
 
 KSTREAM_INIT(gzFile, gzread, 65536)
 
