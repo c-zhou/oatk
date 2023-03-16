@@ -281,7 +281,7 @@ int main(int argc, char *argv[])
         outname = "oatk.asm";
         fprintf(stderr, "[W::%s] invalid output name prefix - using '%s' instead\n", __func__, outname);
     }
-    int outlen = strlen(outdir) + strlen(outname) + 1;
+    int outlen = strlen(outdir) + strlen(outname) + 4;
     char *outpref;
     MYMALLOC(outpref, outlen);
     sprintf(outpref, "%s/%s", outdir, outname);
