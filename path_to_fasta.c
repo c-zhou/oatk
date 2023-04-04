@@ -41,7 +41,6 @@
 KSTREAM_INIT(gzFile, gzread, 65536)
 
 int VERBOSE = 0;
-double realtime0;
 
 static ko_longopt_t long_options[] = {
     { "linear",  ko_no_argument, 301 },

@@ -739,7 +739,6 @@ do_clean:
 #include "ketopt.h"
 
 int VERBOSE = 0;
-double realtime0;
 
 static ko_longopt_t long_options[] = {
     { "longest",        ko_no_argument,       301 },

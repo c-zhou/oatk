@@ -332,7 +332,6 @@ int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE 
 #include "ketopt.h"
 
 int VERBOSE = 0;
-double realtime0;
 
 static ko_longopt_t long_options[] = {
     { "nhmmscan", ko_required_argument, 301 },

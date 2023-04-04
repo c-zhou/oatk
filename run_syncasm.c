@@ -182,6 +182,7 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
         fclose(fo);
 
 #ifdef DEBUG_GRAPH_ALIGNMENT
+        asmg_clean_consensus(scg->utg_asmg); // need to clean consensus before alignment
         scg_read_alignment(sr, ra, scg, n_threads, 0);
         fprintf(stderr, "[DEBUG_GRAPH_ALIGNMENT::%s] read alignment\n", __func__);
         scg_rv_print(ra, stderr);
@@ -209,7 +210,6 @@ do_clean:
 #include "ketopt.h"
 
 int VERBOSE = 0;
-double realtime0;
 
 static ko_longopt_t long_options[] = {
     { "max-bubble", ko_required_argument, 301 },
@@ -248,7 +248,7 @@ int main(int argc, char *argv[])
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >= 0) {
         if (c == 'k') k = atoi(opt.arg);
         else if (c == 's') s = atoi(opt.arg);
-        else if (c == 'c') min_k_cov = atoi(opt.arg);
+        else if (c == 'c') min_k_cov = atoi(opt.arg), min_a_cov = MAX(min_k_cov / 3, 1);
         else if (c == 't') n_threads = atoi(opt.arg);
         else if (c == 301) bubble_size = atoi(opt.arg);
         else if (c == 302) tip_size = atoi(opt.arg);

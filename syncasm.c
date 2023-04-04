@@ -50,6 +50,7 @@
 #undef DEBUG_SCM_UTG_INDEX
 #undef DEBUG_UTG_MULTIPLEX
 #undef DEBUG_UTG_DEMULTIPLEX
+#undef DEBUG_UTG_COVERAGE
 
 static kh_inline khint_t kh_hash_uint128(uint128_t key)
 {
@@ -655,6 +656,13 @@ void scg_consensus(sr_v *sr, scg_t *scg, int w, int save_seq, FILE *fo)
             s->seq[l] = 0;
         }
         if (fo) fprintf(fo, "S\tu%lu\t%.*s\tLN:i:%ld\tKC:i:%ld\tSC:f:%.3f\n", i, (int) l, c_seq.s, l, (int64_t) (l*cov), cov);
+
+#ifdef DEBUG_UTG_COVERAGE
+        fprintf(stderr, "[DEBUG_UTG_COVERAGE::%s] u%lu [N=%lu]:", __func__, i, s->n);
+        uint64_t j;
+        for (j = 0; j < s->n; ++j) fprintf(stderr, " %u", scg->scm[s->a[j]>>1].k_cov);
+        fprintf(stderr, "\n");
+#endif
     }
 
     for (i = 0, n = utg_asmg->n_arc; i < n; ++i) {
@@ -1011,6 +1019,13 @@ int scg_multiplex(scg_t *g, scg_ra_v *ra_v, double r_thresh)
                     // mark l0 l1
                     kv_push(uint64_t, multi_arc[l0].arc_next, a_out[t].w);
                     kv_push(uint64_t, multi_arc[l1^1].arc_next, a_in[s].w);
+#ifdef DEBUG_UTG_MULTIPLEX
+                    fprintf(stderr, "[DEBUG_UTG_MULTIPLEX::%s] triplex score u%lu%c u%lu+ u%lu%c: %.3f\n", __func__,
+                            a_in[s].w>>1, "-+"[a_in[s].w&1],
+                            v1>>1,
+                            a_out[t].w>>1, "+-"[a_out[t].w&1],
+                            score);
+#endif
                 }
             }
         }

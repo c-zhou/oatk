@@ -47,7 +47,6 @@
 #include "version.h"
 
 int VERBOSE = 0;
-double realtime0;
 
 int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_size, int min_k_cov, int min_a_cov,
         double weak_cross, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE);
