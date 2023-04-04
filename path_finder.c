@@ -44,10 +44,6 @@
 
 #undef DEBUG_MINICIRCLE_REPEAT_UNIT
 
-char TAG_ARC_COV[4]; // arc coverage
-char TAG_SEQ_COV[4]; // seq coverage
-char TAG_SBP_COV[4]; // seq total base coverage
-
 KHASHL_MAP_INIT(KH_LOCAL, kh_s32_t, kh_s32, khint32_t, uint32_t, kh_hash_dummy, kh_eq_generic);
 
 static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components,
