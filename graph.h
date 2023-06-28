@@ -84,7 +84,7 @@ asmg_t *asmg_unitigging(asmg_t *g);
 uint64_t asmg_drop_tip(asmg_t *g, int32_t tip_cnt, uint64_t tip_len, int do_cleanup, int VERBOSE);
 uint64_t asmg_pop_bubble(asmg_t *g, uint64_t radius, uint64_t max_del, int protect_tip, int protect_super_bubble, int do_cleanup, int VERBOSE);
 uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, int VERBOSE);
-void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64_t dist);
+uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64_t dist, uint32_t *_nv, int modify_graph);
 int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, uint64_t dist, uint32_t *_step, uint64_t *_dist);
 #ifdef __cplusplus
 }
@@ -199,6 +199,16 @@ static inline asmg_arc_t *asmg_arc1(asmg_t *g, uint64_t v, uint64_t w)
     return 0;
 }
 
+static inline asmg_arc_t *asmg_comp_arc(asmg_t *g, asmg_arc_t *a)
+{
+    return asmg_arc(g, a->w^1, a->v^1);
+}
+
+static inline asmg_arc_t *asmg_comp_arc1(asmg_t *g, asmg_arc_t *a)
+{
+    return asmg_arc1(g, a->w^1, a->v^1);
+}
+
 static inline int asmg_arc_exist(asmg_t *g, uint64_t v, uint64_t w)
 {
     uint64_t i, n;
@@ -276,6 +286,20 @@ static inline void asmg_clean_consensus(asmg_t *g)
         }
         g->vtx[i].len = 0;
     }
+}
+
+static inline uint64_t asmg_arc_head_e(asmg_t *g, asmg_arc_t *a)
+{
+    uint64_t v = a->v;
+    asmg_vtx_t *vtx = &g->vtx[v>>1];
+    return (v&1)? (vtx->a[0]^1) : (vtx->a[vtx->n-1]);
+}
+
+static inline uint64_t asmg_arc_tail_e(asmg_t *g, asmg_arc_t *a)
+{
+    uint64_t w = a->w;
+    asmg_vtx_t *vtx = &g->vtx[w>>1];
+    return (w&1)? (vtx->a[vtx->n-1]^1) : (vtx->a[0]);
 }
 
 #endif

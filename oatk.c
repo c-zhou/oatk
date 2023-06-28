@@ -48,8 +48,8 @@
 
 int VERBOSE = 0;
 
-int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_size, int min_k_cov, int min_a_cov,
-        double weak_cross, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE);
+int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_size, int tip_size, int min_k_cov,
+        double min_a_cov_f, double weak_cross, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE);
 
 int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE *fo, uint32_t max_batch_size, 
         uint32_t max_batch_num, int n_threads, char *tmpdir);
@@ -107,12 +107,13 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "k:s:c:m:p:b:T:f:o:t:Vv:h";
+    const char *opt_str = "k:s:c:a:D:m:p:b:T:f:o:t:Vv:h";
     ketopt_t opt = KETOPT_INIT;
-    int k, s, bubble_size, tip_size, do_unzip, min_k_cov, min_a_cov, batch_size;
+    int k, s, bubble_size, tip_size, do_unzip, min_k_cov, batch_size;
     int out_s, out_c, n_db, max_copy, no_trn, n_core, min_len, min_ex_g, max_d_len, do_graph_clean;
     int mini_circle, n_threads;
-    double weak_cross, max_eval, min_score, min_cf, seq_cf;
+    double min_a_cov_f, weak_cross, max_eval, min_score, min_cf, seq_cf;
+    size_t m_data;
     FILE *fp_help;
     char *out, *nhmmscan, *mito_db, *pltd_db, *tmpdir;
     int c, ret = 0;
@@ -128,7 +129,8 @@ int main(int argc, char *argv[])
     k = 1001;
     s = 31;
     min_k_cov = 3;
-    min_a_cov = 1;
+    min_a_cov_f = .35;
+    m_data = 0;
     do_unzip = 1;
     bubble_size = 100000;
     tip_size = 10000;
@@ -159,6 +161,14 @@ int main(int argc, char *argv[])
         if (c == 'k') k = atoi(opt.arg);
         else if (c == 's') s = atoi(opt.arg);
         else if (c == 'c') min_k_cov = atoi(opt.arg);
+        else if (c == 'a') min_a_cov_f = atof(opt.arg);
+        else if (c == 'D') {
+            char *q;
+            m_data = strtol(opt.arg, &q, 0);
+            if (*q == 'k' || *q == 'K') m_data <<= 10;
+            else if (*q == 'm' || *q == 'M') m_data <<= 20;
+            else if (*q == 'g' || *q == 'G') m_data <<= 30;
+        }
         else if (c == 'm') mito_db = opt.arg, ++n_db;
         else if (c == 'p') pltd_db = opt.arg, ++n_db;
         else if (c == 'b') batch_size = atoi(opt.arg);
@@ -217,6 +227,8 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -k INT               kmer size [%d]\n", k);
         fprintf(fp_help, "    -s INT               smer size (no larger than 31) [%d]\n", s);
         fprintf(fp_help, "    -c INT               minimum kmer coverage [%d]\n", min_k_cov);
+        fprintf(fp_help, "    -a FLOAT             minimum arc coverage [%.2f]\n", min_a_cov_f);
+        fprintf(fp_help, "    -D INT               maximum amount of data to use; suffix K/M/G recognized [%lu]\n", m_data);
         fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
         fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);
         fprintf(fp_help, "    --weak-cross FLOAT   maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
@@ -228,7 +240,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -T STR               temporary directory [NULL]\n");
         fprintf(fp_help, "    --nhmmscan STR       nhmmscan executable path [nhmmscan]\n");
         fprintf(fp_help, "  Pathfinder:\n");
-        fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.3f]\n", seq_cf);
+        fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.2f]\n", seq_cf);
         fprintf(fp_help, "    --longest            output only the longest path [default]\n");
         fprintf(fp_help, "    --circular           output only the longest circular path\n");
         fprintf(fp_help, "    --all                output all best paths\n");
@@ -238,7 +250,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    --max-eval  FLOAT    maximum E-value of a core gene [%.3e]\n", max_eval);
         fprintf(fp_help, "    --min-s-length INT   minimum length of a singleton sequence to keep [%d]\n", min_len);
         fprintf(fp_help, "    --max-d-length INT   maximum length of a singleton sequence to delete [%d]\n", max_d_len);
-        fprintf(fp_help, "    --min-s-cov FLOAT    minimum coverage of a sequence compared to the subgraph average [%.3f]\n", min_cf);
+        fprintf(fp_help, "    --min-s-cov FLOAT    minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
         fprintf(fp_help, "    --max-copy INT       maximum copy number to consider [%d]\n", max_copy);
         fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
         fprintf(fp_help, "    --include-trn        include TRN type genes\n");
@@ -269,17 +281,23 @@ int main(int argc, char *argv[])
 
     /*** parse output dirname and basename ***/
     char *outdir, *outname;
+    int free_outdir, free_outname;
     parse_pathname(out, &outdir, &outname);
+    free_outdir = free_outname = 0;
     if (!outdir) {
         outdir = ".";
         fprintf(stderr, "[W::%s] invalid output directory - using '%s' instead\n", __func__, outdir);
     } else {
         make_dir(outdir);
+        free_outdir = 1;
     }
     if (!outname) {
         outname = "oatk.asm";
         fprintf(stderr, "[W::%s] invalid output name prefix - using '%s' instead\n", __func__, outname);
+    } else {
+        free_outname = 1;
     }
+
     int outlen = strlen(outdir) + strlen(outname) + 4;
     char *outpref;
     MYMALLOC(outpref, outlen);
@@ -287,8 +305,8 @@ int main(int argc, char *argv[])
 
     /*** syncasm assembly ***/
     scg_meta_t *scg_meta;
-    MYMALLOC(scg_meta, 1);
-    ret = syncasm(argv + opt.ind, argc - opt.ind, k, s, bubble_size, tip_size, min_k_cov, min_a_cov, weak_cross, do_unzip, n_threads, outpref, scg_meta, VERBOSE);
+    MYCALLOC(scg_meta, 1);
+    ret = syncasm(argv + opt.ind, argc - opt.ind, m_data, k, s, bubble_size, tip_size, min_k_cov, min_a_cov_f, weak_cross, do_unzip, n_threads, outpref, scg_meta, VERBOSE);
     if (ret) {
         fprintf(stderr, "[E::%s] syncasm assembly program failed\n", __func__);
         exit(EXIT_FAILURE);
@@ -343,19 +361,22 @@ int main(int argc, char *argv[])
         ret = pathfinder(asg_file, mito_annot, pltd_annot, n_core, min_len, min_ex_g, max_d_len, max_copy,
                 max_eval, min_score, min_cf, seq_cf, no_trn, do_graph_clean, bubble_size, tip_size, weak_cross,
                 out_s, outpref, VERBOSE);
-    if (ret) {
-        fprintf(stderr, "[E::%s] pathfinder program failed\n", __func__);
-        exit(EXIT_FAILURE);
-    }
 
     /*** final clean ***/
     if (rm_tmpdir) rmdir(tmpdir); // should be empty
     if (free_tmpdir) free(tmpdir);
+    if (free_outdir) free(outdir);
+    if (free_outname) free(outname);
     free(mito_annot);
     free(pltd_annot);
     free(asg_file);
     free(outpref);
     scg_meta_destroy(scg_meta);
+
+    if (ret) {
+        fprintf(stderr, "[E::%s] pathfinder program failed\n", __func__);
+        exit(EXIT_FAILURE);
+    }
 
     if (ret) {
         fprintf(stderr, "[E::%s] oatk program halted\n", __func__);

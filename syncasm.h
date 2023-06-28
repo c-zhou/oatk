@@ -31,6 +31,7 @@
 #ifndef __SYNCASM_H__
 #define __SYNCASM_H__
 
+#include "kstring.h"
 #include "syncmer.h"
 #include "graph.h"
 
@@ -89,19 +90,23 @@ extern "C" {
 #endif
 
 void scg_destroy(scg_t *g);
-scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, uint32_t min_a_cov);
+scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, double min_a_cov_f);
+uint64_t scg_get_scm_id(scg_t *g, uint128_t key);
 void scg_arc_coverage(scg_t *scg, sr_v *sr);
 void process_mergeable_unitigs(scg_t *g);
 int scg_is_empty(scg_t *scg);
 void scg_stat(scg_t *scg, FILE *fo, uint64_t *stats);
-void scg_consensus(sr_v *sr, scg_t *scg, int w, int save_seq, FILE *fo);
+void scg_consensus(sr_v *sr, scg_t *scg, int w, int hoco_seq, int save_seq, FILE *fo);
+void scg_update_utg_cov(scg_t *scg);
 void scg_print_unitig_syncmer_list(scg_t *g, FILE *fo);
-int64_t scg_syncmer_consensus(sr_v *sr, syncmer_t *scm, int rev, int64_t beg, int w, kstring_t *c_seq);
-int64_t scg_unitig_consensus(sr_v *sr, scg_utg_t *utg, syncmer_t *scm, int w, kstring_t *c_seq);
-int scg_multiplex(scg_t *g, scg_ra_v *ra_v, double r_thresh);
+int64_t scg_syncmer_consensus(sr_v *sr, syncmer_t *scm, int rev, int64_t beg, int w, kstring_t *c_seq, int hoco_seq);
+int64_t scg_unitig_consensus(sr_v *sr, scg_utg_t *utg, syncmer_t *scm, int w, kstring_t *c_seq, int hoco_seq);
+int scg_multiplex(scg_t *g, scg_ra_v *ra_v, uint32_t max_n_scm, double min_n_r, double min_d_f);
 void scg_demultiplex(scg_t *g);
 void scg_ra_v_destroy(scg_ra_v *ra_v);
 void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int for_unzip);
+void scg_ra_utg_coverage(scg_t *g, sr_v *sr_v, scg_ra_v *ra_v, int verbose);
+void scg_ra_arc_coverage(scg_t *g, int fix, int verbose);
 void scg_ra_print(scg_ra_t *ra, FILE *fo);
 void scg_rv_print(scg_ra_v *rv, FILE *fo);
 void scg_meta_clean(scg_meta_t *meta);

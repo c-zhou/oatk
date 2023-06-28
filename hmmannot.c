@@ -65,6 +65,7 @@ void hmm_annot_v_destroy(hmm_annot_v *annot_v)
         free(annot_v->dict);
         kh_str_destroy(h_names);
     }
+    free(annot_v);
 }
 
 static int is_empty_line(char *line)
@@ -121,6 +122,7 @@ hmm_annot_v *hmm_annot_read(char *annot_file, hmm_annot_v *annot_v, uint8_t og_t
     }
     
     if (line) free(line);
+    fclose(fp);
 
     return annot_v;
 }

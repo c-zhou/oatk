@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include <errno.h>
 
 #include "kvec.h"
@@ -47,7 +48,7 @@
 #undef DEBUG_GRAPH_MULTIPLEX
 #undef DEBUG_GRAPH_ALIGNMENT
 
-int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_size, int min_k_cov, int min_a_cov,
+int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_size, int tip_size, int min_k_cov, double min_a_cov_f,
         double weak_cross, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE)
 {
     FILE *fo;
@@ -69,7 +70,7 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
     }
 
     MYCALLOC(sr, 1);
-    sr_read(sr_rdr, sr, s, k, n_threads);
+    sr_read(sr_rdr, sr, s, k, m_data, n_threads);
     fprintf(stderr, "[M::%s] collected syncmers from %lu target sequence(s)\n", __func__, sr_rdr->n_seq);
     if (sr_validate(sr)) {
         ret = 1;
@@ -82,11 +83,8 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
 
     if (min_k_cov == 0) {
         min_k_cov = stats->kmer_peak_het > 0? (stats->kmer_peak_het * 10) : (stats->kmer_peak_hom * 10);
-        min_a_cov = MAX(min_k_cov / 3, 1);
         fprintf(stderr, "[M::%s] set minimum kmer coverage as %d\n", __func__, min_k_cov);
-        fprintf(stderr, "[M::%s] set minimum edge coverage as %d\n", __func__, min_a_cov);
     }
-
     free(stats);
     sstream_close(sr_rdr);
 
@@ -99,7 +97,7 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
 
     // make syncmer graph
     fprintf(stderr, "[M::%s] make syncmer graph\n", __func__);
-    scg = make_syncmer_graph(sr, min_k_cov, min_a_cov);
+    scg = make_syncmer_graph(sr, min_k_cov, min_a_cov_f);
     if (!scg || scg_is_empty(scg)) {
         fprintf(stderr, "[E::%s] empty syncmer graph\n", __func__);
         ret = 1;
@@ -107,11 +105,17 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
     }
     fprintf(stderr, "[M::%s] syncmer graph stats\n", __func__);
     scg_stat(scg, stderr, 0);
+
 #ifdef DEBUG_SYNCMER_GRAPH
     fo = open_outstream(out, "_syncmer.gfa");
-    scg_consensus(sr, scg, k, 0, fo);
+    scg_consensus(sr, scg, k, 0, 0, fo);
     asmg_clean_consensus(scg->utg_asmg);
     fclose(fo);
+    MYCALLOC(ra, 1);
+    scg_read_alignment(sr, ra, scg, n_threads, 0);
+    fprintf(stderr, "[DEBUG_SYNCMER_GRAPH::%s] read alignment\n", __func__);
+    scg_rv_print(ra, stderr);
+    scg_ra_v_destroy(ra);
 #endif
 
     // make unitigs
@@ -120,7 +124,7 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
     fprintf(stderr, "[M::%s] syncmer graph stats after unitigging\n", __func__);
     scg_stat(scg, stderr, 0);
     fo = open_outstream(out, "_utg.gfa");
-    scg_consensus(sr, scg, k, 0, fo);
+    scg_consensus(sr, scg, k, 0, 0, fo);
     fclose(fo);
 
     // do basic cleanup
@@ -133,7 +137,7 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
     fprintf(stderr, "[M::%s] syncmer graph stats after cleanup\n", __func__);
     scg_stat(scg, stderr, 0);
     fo = open_outstream(out, do_unzip? "_utg_clean.gfa" : "_utg_final.gfa");
-    scg_consensus(sr, scg, k, 0, fo);
+    scg_consensus(sr, scg, k, 0, 0, fo);
     fclose(fo);
 
     // do read threading
@@ -141,6 +145,10 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
     if (do_unzip) {
         fprintf(stderr, "[M::%s] assembly graph unzipping\n", __func__);
         int round, updated;
+        uint32_t max_n_scm;
+
+        // set max_n_scm for maximum repeats of ~15Kb which reach the HiFi read length limit
+        max_n_scm = ceil(30000.0/k);
 
         // do multiplexing
         round = 0;
@@ -148,7 +156,8 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
         asmg_clean_consensus(scg->utg_asmg); // need to clean consensus information
         while (updated != 0 && round < 10) {
             scg_read_alignment(sr, ra, scg, n_threads, 1);
-            updated = scg_multiplex(scg, ra, 3);
+            scg_update_utg_cov(scg);
+            updated = scg_multiplex(scg, ra, max_n_scm, 10, .3);
             if (VERBOSE > 0) {
                 fprintf(stderr, "[M::%s] syncmer graph stats after multiplexing round %d\n", __func__, ++round);
                 scg_stat(scg, stderr, 0);
@@ -165,7 +174,7 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
         fprintf(stderr, "[M::%s] syncmer graph stats after unzipping\n", __func__);
         scg_stat(scg, stderr, 0);
         fo = open_outstream(out, "_utg_unzip.gfa");
-        scg_consensus(sr, scg, k, 0, fo);
+        scg_consensus(sr, scg, k, 0, 0, fo);
         fclose(fo);
 
         // do basic cleanup
@@ -177,13 +186,15 @@ int syncasm(char **file_in, int n_file, int k, int s, int bubble_size, int tip_s
         process_mergeable_unitigs(scg);
         fprintf(stderr, "[M::%s] syncmer graph stats after final cleanup\n", __func__);
         scg_stat(scg, stderr, 0);
+        // redo unitig and arc coverage estimation
+        scg_read_alignment(sr, ra, scg, n_threads, 0);
+        scg_ra_utg_coverage(scg, sr, ra, VERBOSE);
+        scg_ra_arc_coverage(scg, 1, VERBOSE);
         fo = open_outstream(out, "_utg_final.gfa");
-        scg_consensus(sr, scg, k, 0, fo);
+        scg_consensus(sr, scg, k, 0, 0, fo);
         fclose(fo);
 
 #ifdef DEBUG_GRAPH_ALIGNMENT
-        asmg_clean_consensus(scg->utg_asmg); // need to clean consensus before alignment
-        scg_read_alignment(sr, ra, scg, n_threads, 0);
         fprintf(stderr, "[DEBUG_GRAPH_ALIGNMENT::%s] read alignment\n", __func__);
         scg_rv_print(ra, stderr);
 #endif
@@ -224,10 +235,11 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "k:s:c:t:v:o:Vh";
+    const char *opt_str = "k:s:c:a:D:t:v:o:Vh";
     ketopt_t opt = KETOPT_INIT;
-    int c, k, s, bubble_size, tip_size, do_unzip, min_k_cov, min_a_cov, n_threads;
-    double weak_cross;
+    int c, k, s, bubble_size, tip_size, do_unzip, min_k_cov, n_threads;
+    size_t m_data;
+    double min_a_cov_f, weak_cross;
     char *out;
     FILE *fp_help = stderr;
     int ret = 0;
@@ -237,18 +249,27 @@ int main(int argc, char *argv[])
     k = 1001;
     s = 31;
     min_k_cov = 3;
-    min_a_cov = 1;
+    min_a_cov_f = .35;
     n_threads = 1;
     do_unzip = 1;
     bubble_size = 100000;
     tip_size = 10000;
     weak_cross = 0.3;
+    m_data = 0;
     out = "syncasm.asm";
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >= 0) {
         if (c == 'k') k = atoi(opt.arg);
         else if (c == 's') s = atoi(opt.arg);
-        else if (c == 'c') min_k_cov = atoi(opt.arg), min_a_cov = MAX(min_k_cov / 3, 1);
+        else if (c == 'c') min_k_cov = atoi(opt.arg);
+        else if (c == 'a') min_a_cov_f = atof(opt.arg);
+        else if (c == 'D') {
+            char *q;
+            m_data = strtol(opt.arg, &q, 0);
+            if (*q == 'k' || *q == 'K') m_data <<= 10;
+            else if (*q == 'm' || *q == 'M') m_data <<= 20;
+            else if (*q == 'g' || *q == 'G') m_data <<= 30;
+        }
         else if (c == 't') n_threads = atoi(opt.arg);
         else if (c == 301) bubble_size = atoi(opt.arg);
         else if (c == 302) tip_size = atoi(opt.arg);
@@ -280,6 +301,8 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -k INT               kmer size [%d]\n", k);
         fprintf(fp_help, "    -s INT               smer size (no larger than 31) [%d]\n", s);
         fprintf(fp_help, "    -c INT               minimum kmer coverage [%d]\n", min_k_cov);
+        fprintf(fp_help, "    -a FLOAT             minimum arc coverage [%.2f]\n", min_a_cov_f);
+        fprintf(fp_help, "    -D INT               maximum amount of data to use; suffix K/M/G recognized [%lu]\n", m_data);
         fprintf(fp_help, "    -t INT               number of threads [%d]\n", n_threads);
         fprintf(fp_help, "    -o FILE              prefix of output files [%s]\n", out);
         fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
@@ -292,7 +315,7 @@ int main(int argc, char *argv[])
         return fp_help == stdout? 0 : 1;
     }
 
-    ret = syncasm(argv + opt.ind, argc - opt.ind, k, s, bubble_size, tip_size, min_k_cov, min_a_cov, weak_cross, do_unzip, n_threads, out, 0, VERBOSE);
+    ret = syncasm(argv + opt.ind, argc - opt.ind, m_data, k, s, bubble_size, tip_size, min_k_cov, min_a_cov_f, weak_cross, do_unzip, n_threads, out, 0, VERBOSE);
 
     if (ret) {
         fprintf(stderr, "[E::%s] failed to constrcut assembly\n", __func__);

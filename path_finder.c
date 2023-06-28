@@ -46,9 +46,45 @@
 
 KHASHL_MAP_INIT(KH_LOCAL, kh_s32_t, kh_s32, khint32_t, uint32_t, kh_hash_dummy, kh_eq_generic);
 
+typedef struct { size_t n, m; uint32_t *a; } v_u32_t;
+typedef struct { size_t n, m; v_u32_t *a; } lv_u32_t;
+
+static void lv_u32_destroy(lv_u32_t *lv)
+{
+    size_t i;
+    for (i = 0; i < lv->n; ++i)
+        kv_destroy(lv->a[i]);
+    kv_destroy(*lv);
+}
+
+static lv_u32_t parse_subgraph(asg_t *asg)
+{
+    uint32_t i, j, n_seg, *vlist, nv;
+    lv_u32_t lv_list;
+    asmg_t *g;
+    uint8_t *visited;
+
+    g = asg->asmg;
+    n_seg = asg->n_seg;
+    kv_init(lv_list);
+    MYCALLOC(visited, n_seg);
+    for (i = 0; i < n_seg; ++i) {
+        if (visited[i] || g->vtx[i].del) continue;
+        vlist = asmg_subgraph(g, &i, 1, 0, 0, &nv, 0);
+        assert(nv > 0);
+        v_u32_t lv = {nv, nv, vlist};
+        kv_push(v_u32_t, lv_list, lv);
+        for (j = 0; j < nv; ++j)
+            visited[vlist[j]] = 1;
+    }
+    free(visited);
+
+    return lv_list;
+}
+
 static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components,
-        int max_copy, int min_ex_g, uint32_t max_d_len, double seq_cf, int do_clean, int bubble_size, 
-        int tip_size, double weak_cross, char *out_pref, int out_opt, uint8_t og_type, int VERBOSE)
+        int max_copy, int min_ex_g, uint32_t max_d_len, double seq_cf, int do_clean, double min_cf,
+        int bubble_size, int tip_size, double weak_cross, char *out_pref, int out_opt, uint8_t og_type, int VERBOSE)
 {
     assert(og_type == OG_MITO || og_type == OG_PLTD || og_type == OG_MINI);
 
@@ -81,14 +117,16 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
     }
     free(m_str);
 
-    uint32_t i, j, opt_circ;
+    uint32_t i, j, v, opt_circ;
     int c, ex_g, absent;
     uint64_t n_seg;
     og_component_t *component;
     kh_s32_t *h_genes;
     khint32_t k;
     kvec_t(uint32_t) sub_v;
-
+    asmg_t *o_asmg;
+    
+    o_asmg = asg->asmg; // original copy of asmg
     n_seg = asg->n_seg;
     h_genes = kh_s32_init();
     kv_init(sub_v);
@@ -123,8 +161,12 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
         }
 
         // processing the subgraph
-        asg_subgraph(asg, component->v, 1, 0, 0);
-        
+        // make a copy of the orginal asmg
+        asg->asmg = asg_make_asmg_copy(o_asmg, 0);
+        // make subgraph
+        uint32_t *vlist = asmg_subgraph(asg->asmg, component->v, 1, 0, 0, 0, 1);
+        free(vlist);
+
         if (VERBOSE > 1) {
             if (VERBOSE > 2) {
                 fprintf(stderr, "[M::%s] subgraph created\n", __func__);
@@ -172,10 +214,10 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
         
         int *copy_number;
         MYMALLOC(copy_number, n_seg);
-        estimate_sequence_copy_number_from_coverage(asg, copy_number, max_copy);
+        estimate_sequence_copy_number_from_coverage(asg, copy_number, min_cf, 1, max_copy);
         // make a copy of the graph
         asg_t *asg_copy = asg_make_copy(asg);
-        kh_u32_t *seg_dups = sequence_duplication_by_copy_number(asg_copy, copy_number);
+        kh_u32_t *seg_dups = sequence_duplication_by_copy_number(asg_copy, copy_number, 0);
         path_v paths;
         kv_init(paths);
         graph_path_finder(asg_copy, seg_dups, &paths);
@@ -193,15 +235,18 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
             kv_push(uint32_t, sub_v, component->v[0]);
         } else {
             uint32_t b, is_circ;
+            kvec_t(uint32_t) v_pb;
             double f;
             if (og_type == OG_PLTD) // only for pltd
                 for (j = 0; j < paths.n; ++j)
                     path_rotate(asg, &paths.a[j], annot_v, 2);
             path_sort(&paths);
             // TODO improve the selection criteria
+            kv_init(v_pb);
             b = select_best_seq(asg, &paths, 0, out_opt, seq_cf, 0, og_type == OG_PLTD);
             f = sequence_covered_by_path(asg, &paths.a[b], component->len);
             is_circ = paths.a[b].circ;
+            kv_push(uint32_t, v_pb, b);
             if (VERBOSE > 0)
                 fprintf(stderr, "[M::%s] best path after first pass: type, %s; coverage, %.3f\n", 
                         __func__, is_circ? "circular" : "linear", f);
@@ -212,39 +257,77 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                     // make another copy of the graph
                     asg_t *asg_copy1 = asg_make_copy(asg);
                     // do path finding
-                    kh_u32_t *seg_dups1 = sequence_duplication_by_copy_number(asg_copy1, copy_number);
+                    // allow deletion of segs here if the adjusted copy number is zero
+                    kh_u32_t *seg_dups1 = sequence_duplication_by_copy_number(asg_copy1, copy_number, 1);
+                    
+                    // subgraph may be divided into multiple subgraphs
                     path_v paths1;
+                    uint32_t b1, is_circ1;
+                    kvec_t(uint32_t) v_pb1;
+                    double f1;
+                    asmg_t *o_g1, *g1;
+
+                    // vertex list of subgraphs
+                    lv_u32_t vlist = parse_subgraph(asg_copy1);
+                    is_circ1 = 1;
+                    f1 = .0;
+                    o_g1 = asg_copy1->asmg;
                     kv_init(paths1);
-                    graph_path_finder(asg_copy1, seg_dups1, &paths1);
+                    kv_init(v_pb1);
+                    // do path finding for each subgraph
+                    for (j = 0; j < vlist.n; ++j) {
+                        // initialise the subgraph
+                        g1 = asg_make_asmg_copy(o_g1, 0);
+                        for (v = 0; v < asg_copy1->n_seg; ++v)
+                            g1->vtx[v].del = 1;
+                        for (v = 0; v < vlist.a[j].n; ++v)
+                            g1->vtx[vlist.a[j].a[v]].del = 0;
+                        // remove dirty arcs
+                        for (v = 0; v < g1->n_arc; ++v)
+                            if (g1->vtx[g1->arc[v].v>>1].del || g1->vtx[g1->arc[v].w>>1].del)
+                                g1->arc[v].del = 1;
+
+                        path_v tmp_paths1 = {0, 0, 0};
+                        asg_copy1->asmg = g1;
+                        graph_path_finder(asg_copy1, seg_dups1, &tmp_paths1);
+
+                        if (og_type == OG_PLTD) // only for pltd
+                            for (j = 0; j < tmp_paths1.n; ++j)
+                                path_rotate(asg_copy1, &tmp_paths1.a[j], annot_v, 2);
+                        path_sort(&tmp_paths1);
+                        // TODO improve the selection criteria
+                        b1 = select_best_seq(asg_copy1, &tmp_paths1, 0, out_opt, seq_cf, 0, og_type == OG_PLTD);    
+                        f1 += sequence_covered_by_path(asg_copy1, &tmp_paths1.a[b1], component->len);
+                        is_circ1 &= tmp_paths1.a[b1].circ;
+                        // add all paths
+                        kv_push(uint32_t, v_pb1, b1 + paths1.n);
+                        kv_pushn(path_t, paths1, tmp_paths1.a, tmp_paths1.n);
+                        // do not destroy path_v
+                        // path_v_destroy(&tmp_paths1);
+                        // only need to free tmp_paths1.a
+                        kv_destroy(tmp_paths1);
+                        asmg_destroy(g1);
+                    }
+                    asg_copy1->asmg = o_g1;
+
                     kh_u32_destroy(seg_dups1);
                     asg_destroy(asg_copy1);
-
-                    uint32_t b1, is_circ1;
-                    double f1;
-                    if (og_type == OG_PLTD) // only for pltd
-                        for (j = 0; j < paths1.n; ++j)
-                            path_rotate(asg, &paths1.a[j], annot_v, 2);
-                    path_sort(&paths1);
-                    // TODO improve the selection criteria
-                    b1 = select_best_seq(asg, &paths1, 0, out_opt, seq_cf, 0, og_type == OG_PLTD);
-                    f1 = sequence_covered_by_path(asg, &paths1.a[b1], component->len);
-                    is_circ1 = paths1.a[b1].circ;
 
                     // compare new path to old to make final choice
                     if ((is_circ1 && f1 >= seq_cf) || ((is_circ1 || !is_circ) && f1 > f)) {
                         // choose the new one
-                        b = b1;
                         f = f1;
                         is_circ = is_circ1;
-                        for (j = 0; j < paths.n; ++j)
-                            path_destroy(&paths.a[j]);
-                        kv_destroy(paths);
+                        kv_copy(uint32_t, v_pb, v_pb1);
+                        path_v_destroy(&paths);
                         paths = paths1;
                     } else {
-                        for (j = 0; j < paths1.n; ++j)
-                            path_destroy(&paths1.a[j]);
-                        kv_destroy(paths1);
+                        path_v_destroy(&paths1);
                     }
+                    
+                    kv_destroy(v_pb1);
+                    lv_u32_destroy(&vlist);
+
                     if (VERBOSE > 0)
                         fprintf(stderr, "[M::%s] best path after second pass: type, %s; coverage, %.3f\n",
                                 __func__, is_circ? "circular" : "linear", f);
@@ -255,7 +338,6 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
             if (is_circ || !opt_circ || component->len > max_d_len) {
                 if (!opt_circ) opt_circ = is_circ;
                 
-                ++c;
                 kv_push(uint32_t, sub_v, component->v[0]);
 
                 // update gene table
@@ -268,30 +350,39 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                         kh_val(h_genes, k) = (uint32_t) component->g[j];
                     }
                 }
-
+                
                 path_stats(asg, &paths, out_stats);
-                print_seq(asg, &paths.a[b], out_seq, c, 0, 60);
-            
+                for (j = 0; j < v_pb.n; ++j)
+                    print_seq(asg, &paths.a[v_pb.a[j]], out_seq, ++c, 0, 60, 100);
+                
                 if (VERBOSE > 0)
                     fprintf(stderr, "[M::%s] processing subgraph seeding from %s DONE, %d better genes gained\n",
                             __func__, asg->seg[component->v[0]].name, ex_g);
             }
+
+            kv_destroy(v_pb);
         }
 
-        for (j = 0; j < paths.n; ++j)
-            path_destroy(&paths.a[j]);
-        kv_destroy(paths);
+        path_v_destroy(&paths);
 
         free(copy_number);
+
+        asmg_destroy(asg->asmg);
+        asg->asmg = o_asmg; // roll back to the original copy
     }
 
     // extract and output organelle gfa components
     if (sub_v.n > 0) {
         // in subgraph all vtx and arcs deleted during expansion are back
-        asg_subgraph(asg, sub_v.a, sub_v.n, 0, 0);
+        asg->asmg = asg_make_asmg_copy(o_asmg, 0);
+        uint32_t *vlist = asmg_subgraph(asg->asmg, sub_v.a, sub_v.n, 0, 0, 0, 1);
+        free(vlist);
         asg_print(asg, out_gfa, 0);
+        asmg_destroy(asg->asmg);
+        asg->asmg = o_asmg;
     }
     kv_destroy(sub_v);
+    kh_s32_destroy(h_genes);
 
     fclose(out_stats);
     fclose(out_seq);
@@ -591,12 +682,15 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
         scg_rv_print(scg_meta->ra, stderr);
 #endif
 
-        scg_consensus(scg_meta->sr, scg_meta->scg, scg_meta->k, 0, 0);
+        scg_consensus(scg_meta->sr, scg_meta->scg, scg_meta->k, 0, 0, 0);
         extract_minicircles_with_anchor(scg_meta->ra, scg_meta->scg, anchor_sid, n_threads, &paths);
     }
 
     // prepare assembly subgraph for output
-    asmg_subgraph(asg->asmg, &anchor_sid, 1, 0, 0);
+    asmg_t *o_asmg = asg->asmg;
+    asg->asmg = asg_make_asmg_copy(o_asmg, 0);
+    uint32_t *vlist = asmg_subgraph(asg->asmg, &anchor_sid, 1, 0, 0, 0, 1);
+    free(vlist);
 
     if (paths.n == 0) {
         // not possible to solve the graph
@@ -612,14 +706,14 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
         // TODO improve the selection criteria
         b = select_best_seq(asg, &paths, 0, out_opt, seq_cf, 0, 0);
         path_stats(asg, &paths, out_stats);
-        print_seq(asg, &paths.a[b], out_seq, 1, 0, 60);
+        print_seq(asg, &paths.a[b], out_seq, 1, 0, 60, 100);
     }
 
     asg_print(asg, out_gfa, 0);
+    asmg_destroy(asg->asmg);
+    asg->asmg = o_asmg; // roll back to the original copy
 
-    for (i = 0; i < paths.n; ++i)
-        path_destroy(&paths.a[i]);
-    kv_destroy(paths);
+    path_v_destroy(&paths);
 
     fclose(out_stats);
     fclose(out_seq);
@@ -662,6 +756,11 @@ int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta
     }
 
     og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, &seg_annot_score, VERBOSE);
+    if (!og_components) {
+        fprintf(stderr, "[E::%s] no organelle component found\n", __func__);
+        ret = 1;
+        goto do_clean;
+    }
     if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
 
     parse_organelle_minicircle(asg, annot_v, og_components, seg_annot_score, scg_meta, n_threads, out_pref, out_opt, seq_cf, VERBOSE);
@@ -713,15 +812,21 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, i
     if (do_graph_clean && min_cf > .0) clean_graph_by_sequence_coverage(asg, min_cf, max_copy, VERBOSE);
 
     og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, 0, VERBOSE);
+    if (!og_components) {
+        fprintf(stderr, "[E::%s] no organelle component found\n", __func__);
+        ret = 1;
+        goto do_clean;
+    }
+
     if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
 
     // graph will be changed with extra copies of sequences added
     if (mito_annot)
         parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-                do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
+                do_graph_clean, min_cf, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
     if (pltd_annot)
         parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-                do_graph_clean, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
+                do_graph_clean, min_cf, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
 
 do_clean:
     asg_destroy(asg);
@@ -840,13 +945,13 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
-        fprintf(fp_help, "Usage: pathfinder [options] <file>[.gfa[.gz]] [path_str]\n");
+        fprintf(fp_help, "Usage: pathfinder [options] <file>[.gfa[.gz]]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "  Input/Output:\n");
         fprintf(fp_help, "    -m FILE              mitochondria core gene annotation file [NULL]\n");
         fprintf(fp_help, "    -p FILE              plastid core gene annotation file [NULL]\n");
         fprintf(fp_help, "    -o FILE              prefix of output files [%s]\n", out_pref);
-        fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.3f]\n", seq_cf);
+        fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.2f]\n", seq_cf);
         fprintf(fp_help, "    --longest            output only the longest path [default]\n");
         fprintf(fp_help, "    --circular           output only the longest circular path\n");
         fprintf(fp_help, "    --all                output all best paths\n");
@@ -865,7 +970,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    --max-d-length INT   maximum length of a singleton sequence to delete [%d]\n", max_d_len);
         fprintf(fp_help, "  Path-finding:\n");
         fprintf(fp_help, "    -c INT               maximum copy number to consider [%d]\n", max_copy);
-        fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.3f]\n", min_cf);
+        fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
         fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
         fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
         fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);

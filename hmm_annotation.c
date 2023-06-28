@@ -320,6 +320,7 @@ int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE 
         kt_pipeline(n_threads, annot_worker_pipeline, &pl, 3);
         ks_destroy(ks);
         if (pl.s->s) free(pl.s->s);
+        free(pl.s);
         gzclose(fp);
     }
 

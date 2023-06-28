@@ -322,7 +322,7 @@ uint32_t *asmg_uext_arc_group(asmg_t *g, uint32_t *n_group)
     u64_v_t a = {0, 0, 0};
 
     n_vtx = g->n_vtx;
-    n_arc = asmg_max_link_id(g); // number unique arcs
+    n_arc = asmg_max_link_id(g) + 1; // number unique arcs
     
     MYMALLOC(arc_group, n_arc);
     MYBONE(arc_group, n_arc);
@@ -337,9 +337,9 @@ uint32_t *asmg_uext_arc_group(asmg_t *g, uint32_t *n_group)
             v = i << 1 | k;
             vt = asmg_uext(g, v, n_vtx*2+1, 0, 0, &a);
             for (j = 1; j < a.n; ++j) {
-                ++na;
                 arc_group[asmg_arc1(g, a.a[j-1], a.a[j])->link_id] = group;
                 visited[a.a[j]>>1] = 1;
+                ++na;
             }
             if (vt == ASMG_VT_MULTI_NEI) {
                 arc_group[asmg_arc_a1(g, a.a[a.n-1])->link_id] = group;
@@ -729,6 +729,8 @@ asmg_t *asmg_unitigging(asmg_t *g)
                     vtx1->len = 0;
                     vtx1->cov = vtx1->del = vtx1->circ = 0;
                     MYREALLOC(vtx1->a, vtx1->n);
+                } else {
+                    kv_destroy(vec);
                 }
             }
         }
@@ -764,6 +766,8 @@ asmg_t *asmg_unitigging(asmg_t *g)
             vtx1->len = 0;
             vtx1->cov = vtx1->del = vtx1->circ = 0;
             MYREALLOC(vtx1->a, vtx1->n);
+        } else {
+            kv_destroy(vec);
         }
     }
 
@@ -791,6 +795,8 @@ asmg_t *asmg_unitigging(asmg_t *g)
             vtx1->cov = vtx1->del = 0;
             vtx1->circ = 1;
             MYREALLOC(vtx1->a, vtx1->n);
+        } else {
+            kv_destroy(vec);
         }
     }
     free(vtx_visited);
@@ -880,15 +886,23 @@ asmg_t *asmg_unitigging(asmg_t *g)
 
 KDQ_INIT(uint64_t)
 
-void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64_t dist)
+uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, 
+        uint64_t dist, uint32_t *_nv, int modify_graph)
 {
-    // TODO dealing with graphs with deleted vertices and arcs
     // make a subgraph from given a vertex set and radius
-    // all vertices and arcs in other components will be marked as deleted
-    if (n == 0) return;
+    // if modify_graph
+    //     all vertices and arcs in other components will be marked as deleted
+    //     return NULL
+    // else
+    //     keep graph unchanged
+    //     return the list of vertices in the subgraph
+    if (n == 0) {
+        if (_nv) *_nv = 0;
+        return 0;
+    }
 
-    uint32_t i, v, r, nv;
-    uint64_t x, rd;
+    uint32_t r;
+    uint64_t i, v, x, rd, nv;
     int8_t *flag;
     kdq_t(uint64_t) *q;
     kdq_t(uint64_t) *d;
@@ -898,9 +912,18 @@ void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64
         step = UINT32_MAX;
     if (dist == 0)
         dist = UINT64_MAX;
+
+    MYCALLOC(flag, asmg_vtx_n(g));
+    // flag deleted segments
+    for (i = 0; i < g->n_vtx; ++i) {
+        if (g->vtx[i].del) {
+            flag[i<<1|0] = -1;
+            flag[i<<1|1] = -1;
+        }
+    }
+
     q = kdq_init(uint64_t, 0);
     d = kdq_init(uint64_t, 0);
-    MYCALLOC(flag, asmg_vtx_n(g));
     for (i = 0; i < n; ++i) {
         if (seeds[i] < g->n_vtx) {
             kdq_push(uint64_t, q, ((uint64_t)seeds[i]<<1|0)<<32);
@@ -909,23 +932,28 @@ void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64
             kdq_push(uint64_t, d, 0);
         }
     }
-    for (i = 0; i < g->n_vtx; ++i) // mark all segments to be deleted
-        g->vtx[i].del = 1;
-    for (i = 0; i < g->n_arc; ++i) // mark all arcs to be deleted
-        g->arc[i].del = 1;
+
+    if (modify_graph) {
+        for (i = 0; i < g->n_vtx; ++i) // mark all segments to be deleted
+            g->vtx[i].del = 1;
+        // for (i = 0; i < g->n_arc; ++i) // mark all arcs to be deleted
+        //     g->arc[i].del = 1;
+    }
+
     while (kdq_size(q) > 0) {
         x = *kdq_shift(uint64_t, q);
         v = x>>32;
         r = (uint32_t) x;
         rd = *kdq_shift(uint64_t, d);
-        if (flag[v]) continue; // already visited
+        if (flag[v] != 0) continue; // already visited or deleted
         flag[v] = 1;
-        g->vtx[v>>1].del = 0;
+        if (modify_graph) g->vtx[v>>1].del = 0;
         if (r < step && rd < dist) {
             nv = asmg_arc_n(g, v);
             av = asmg_arc_a(g, v);
             for (i = 0; i < nv; ++i) {
-                av[i].del = 0;
+                if (av[i].del) continue;
+                // if (modify_graph) av[i].del = 0;
                 if (flag[av[i].w] == 0) {
                     kdq_push(uint64_t, q, (uint64_t)av[i].w<<32 | (r + 1));
                     kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
@@ -939,11 +967,40 @@ void asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64
     }
     assert(kdq_size(d) == 0);
 
+    // change flag index from vtx<<1 to vtx
+    for (i = 0; i < g->n_vtx; ++i)
+        flag[i] = (flag[i<<1|0] > 0 || flag[i<<1|1] > 0);
+
+    kvec_t(uint32_t) vlist;
+    kv_init(vlist);
+    nv = 0;
+    if (!modify_graph) {
+        // make vlist
+        for (i = 0; i < g->n_vtx; ++i)
+            if (flag[i])
+                kv_push(uint32_t, vlist, i);
+        nv = vlist.n;
+    } else {
+        // delete dirty arcs
+        for (i = 0; i < g->n_arc; ++i) {
+            if (!flag[g->arc[i].v>>1] || !flag[g->arc[i].w>>1])
+                g->arc[i].del = 1;
+        }
+        if (_nv) {
+            for (i = 0; i < g->n_vtx; ++i)
+                nv += flag[i];
+        }
+    }
+    MYREALLOC(vlist.a, vlist.n);
+
+    if (_nv) *_nv = nv;
+    
     kdq_destroy(uint64_t, q);
     kdq_destroy(uint64_t, d);
     free(flag);
-}
 
+    return vlist.a;
+}
 
 int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, uint64_t dist, uint32_t *_step, uint64_t *_dist)
 {

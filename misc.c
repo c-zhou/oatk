@@ -271,8 +271,15 @@ void parse_pathname(char *path, char **_dirname, char **_basename)
         if (!dirname[i])
             dirname[i] = '/';
     if (dirname != basename) {
-        if (_dirname) *_dirname = len? dirname : strdup("/");
-        if (_basename) *_basename = basename;
+        if (len) {
+            // here need to strdup basename
+            if (_dirname) *_dirname = dirname;
+            if (_basename) *_basename = strdup(basename);
+        } else {
+            // basename with point to dirname
+            if (_dirname) *_dirname = strdup("/");
+            if (_basename) *_basename = basename;
+        }
     } else {
         if ((strlen(basename)==1 && basename[0] == '.') ||
                 (strlen(basename)==2 && 

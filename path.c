@@ -101,16 +101,17 @@ void path_destroy(path_t *path)
         free(path->v);
 }
 
+void path_v_destroy(path_v *path)
+{
+    size_t i;
+    for (i = 0; i < path->n; ++i)
+        path_destroy(&path->a[i]);
+    free(path->a);
+}
+
 static int u64_cmpfunc(const void *a, const void *b)
 {
     return (*(uint64_t *) a > *(uint64_t *) b) - (*(uint64_t *) a < *(uint64_t *) b);
-}
-
-void asg_subgraph(asg_t *asg, uint32_t *seeds, uint32_t n, uint32_t step, uint32_t dist)
-{
-    // make a subgraph from given a vertex set and radius
-    // all vertices and arcs in other components will be marked as deleted
-    asmg_subgraph(asg->asmg, seeds, n, step, dist);
 }
 
 static double graph_sequence_coverage_lower_bound(asg_t *asg, double cov_nq)
@@ -158,6 +159,8 @@ static double graph_sequence_coverage_lower_bound(asg_t *asg, double cov_nq)
     return cov_bound;
 }
 
+/*** old implementation
+ *
 static double graph_sequence_coverage_rough(asg_t *asg)
 {
     uint32_t i, len, cov, deg_in, deg_out;
@@ -193,6 +196,72 @@ static double graph_sequence_coverage_rough(asg_t *asg)
 
     return avg_cov;
 }
+**/
+
+static double graph_sequence_coverage_rough(asg_t *asg, double min_cf)
+{
+    uint32_t i, j, len, cov, best1;
+    double tot_len, tot_len_c, tot_rm, avg_cov, near1, diff1;
+    asmg_t *g;
+    kvec_t(uint64_t) lc_p;
+
+    g = asg->asmg;
+    kv_init(lc_p);
+    for (i = 0; i < g->n_vtx; ++i) {
+        if (g->vtx[i].del) continue;
+        kv_push(uint64_t, lc_p, (uint64_t) (g->vtx[i].cov) << 32 | (g->vtx[i].len));
+    }
+    if (lc_p.n == 0) return .0;
+
+    qsort(lc_p.a, lc_p.n, sizeof(uint64_t), u64_cmpfunc);
+
+    best1 = 0;
+    near1 = DBL_MAX;
+    for (i = 0; i < lc_p.n; ++i) {
+        avg_cov = (double) (lc_p.a[i] >> 32);
+        if (avg_cov == 0)
+            continue;
+        tot_len = tot_len_c = tot_rm = 0;
+        for (j = 0; j < lc_p.n; ++j) {
+            len = (uint32_t) lc_p.a[j];
+            cov = lc_p.a[j] >> 32;
+            if (cov / avg_cov >= min_cf) {
+                tot_len += len;
+                tot_len_c += (double) len * cov / avg_cov;
+            } else {
+                tot_rm += len;
+            }
+        }
+
+        // TODO is this good?
+        if (tot_rm / (tot_rm + tot_len) > 0.7) break;
+
+        if (tot_len > 0) {
+            diff1 = fabs(tot_len_c / tot_len - 1.0);
+            if (diff1 < near1) {
+                near1 = diff1;
+                best1 = i;
+            }
+#ifdef DEBUG_SEG_COV_EST
+            fprintf(stderr, "[DEBUG_SEG_COV_EST::%s] seg %u [%u %lu] - len: %.0f; len_rm: %.0f; len_c: %.3f; diff1: %.3f; best: [%u %.3f]\n",
+                    __func__, i, (uint32_t) lc_p.a[i], lc_p.a[i]>>32, tot_len, tot_rm, tot_len_c, diff1, best1, near1);
+#endif
+        }
+    }
+    if (near1 == DBL_MAX) {
+        kv_destroy(lc_p);
+        return .0;
+    }
+
+    avg_cov = (double) (lc_p.a[best1] >> 32);
+
+#ifdef DEBUG_SEG_COV_EST
+    fprintf(stderr, "[DEBUG_SEG_COV_EST::%s] estimated sequence coverage: %.3f\n", __func__, avg_cov);
+#endif
+
+    kv_destroy(lc_p);
+    return avg_cov;
+}
 
 static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t copy)
 {
@@ -206,9 +275,15 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
     // (X+)->(a+,b+,b+,c+)->(Y+)->(a-,b-,b-,c-)
     // (X+)->(a+,b+,b+,b+,c+)->(Y+)->(a-,b-,c-)
     // TODO solve the copy number of self cycles in postprocessing
+    // now the self arcs is processed in this way
+    // (X+)->(a+)[4]->(Y+) => (X+)->(a0+) ->(a1+) ->(a2+) ->(a3+) ->(Y+)
+    //                            ->(a1+) ->(a2+) ->(a0+) ->(a1+) ->(a0+)
+    //                            ->(a2+) ->(a3+) ->(a3+) ->(a2+) ->(a1+)
+    //                            ->(a3+) ->(Y+)  ->(Y+)  ->(Y+)  ->(a2+)
+    // (a+)->(a-) arcs are not copied
     uint32_t sid;
-    uint64_t i, j, v, nv, pv;
-    kvec_t(uint64_t) arcs_diff; //, arcs_self;
+    uint64_t i, j, v, nv, pv, self_arc;
+    kvec_t(uint64_t) arcs_diff;
     asmg_t *g;
     asmg_arc_t *av;
     asmg_vtx_t *vt;
@@ -220,8 +295,8 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
     g = asg->asmg;
     // mark arcs from vtx
     kv_init(arcs_diff);
-    // kv_init(arcs_self);
-    
+    self_arc = UINT64_MAX;
+
     for (i = 0; i < 2; ++i) {
         v = s<<1 | i;
         pv = g->idx_p[v];
@@ -231,13 +306,10 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
             if (av[j].del) continue;
             if ((av[j].v >> 1) != (av[j].w >> 1))
                 kv_push(uint64_t, arcs_diff, pv+j);
-            /***
-            else if (av[j].v != av[j].w)
-                kv_push(uint64_t, arcs_self, pv+j);
-            else if (i == 0)
+            else if (av[j].v == av[j].w && i == 0)
+                // (a+)->(a+)
                 // avoid adding v+->v+ and v-->v- twice
-                kv_push(uint64_t, arcs_self, pv+j);
-            **/
+                self_arc = pv + j;
         }
     }
 
@@ -270,22 +342,18 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
             asmg_arc_add2(g, sid << 1 | (av->v&1), av->w, av->lo, UINT64_MAX, av->cov / copy, av->comp);
         }
         
-        /***
-        // self arcs
-        for (j = 0; j < arcs_self.n; ++j) {
-            av = &g->arc[arcs_self.a[j]];
-            asmg_arc_add2(g, sid << 1 | (av->v&1), sid << 1 | (av->w&1), av->lo, UINT64_MAX, av->cov / copy, av->comp);
-            uint64_t c;
-            for (c = 1; c <= i; c++) {
-                asmg_arc_add2(g, sid << 1 | (av->v&1), (sid-c) << 1 | (av->w&1), av->lo, UINT64_MAX, av->cov / copy, av->comp);
-                asmg_arc_add2(g, (sid-c) << 1 | (av->v&1), sid << 1 | (av->w&1), av->lo, UINT64_MAX, av->cov / copy, av->comp);
+        if (self_arc != UINT64_MAX) {
+            // tandem repeat
+            // self arcs are added between copies
+            av = &g->arc[self_arc];
+            for (j = 0; j < i; ++j) {
+                asmg_arc_add2(g, (sid - i + j) << 1, sid << 1, av->lo, UINT64_MAX, av->cov / copy, 0);
+                asmg_arc_add2(g, sid << 1, (sid - i + j) << 1, av->lo, UINT64_MAX, av->cov / copy, 0);
             }
         }
-        **/
     }
 
     kv_destroy(arcs_diff);
-    // kv_destroy(arcs_self);
 
     // need to redo sort and index but not graph clean
     asmg_finalize(g, 0);
@@ -298,7 +366,7 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
 
 #define EM_MAX_ITER 1000
 
-double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number, int max_copy)
+double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number, double min_cf, int min_copy, int max_copy)
 {
     uint32_t i, n_seg, iter;
     double total_covs, total_lens, avg_cov, new_avg_cov, min_avg_cov;
@@ -308,30 +376,38 @@ double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number,
     n_seg = asg->n_seg;
     g = asg->asmg;
     min_avg_cov = graph_sequence_coverage_lower_bound(asg, 0.3);
-    avg_cov = graph_sequence_coverage_rough(asg);
+    avg_cov = graph_sequence_coverage_rough(asg, min_cf);
+#ifdef DEBUG_SEG_COPY_EST
+    fprintf(stderr, "[DEBUG_SEG_COPY_EST::%s] min coverage: %.3f; rough avg coverage: %.3f\n",
+            __func__, min_avg_cov, avg_cov);
+#endif
     avg_cov = MAX(avg_cov, min_avg_cov);
     null_v = copy_number == 0;
     if (null_v) MYCALLOC(copy_number, n_seg);
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del) continue;
-        copy_number[i] = MIN(MAX(1, lround((double) asg->seg[i].cov / avg_cov)), max_copy);
+        copy_number[i] = MIN(MAX(min_copy, lround((double) asg->seg[i].cov / avg_cov)), max_copy);
     }
 
     iter = 0;
     while (iter++ < EM_MAX_ITER) {
+#ifdef DEBUG_SEG_COPY_EST
+        fprintf(stderr, "[DEBUG_SEG_COPY_EST::%s] iteration %u avg coverage: %.3f\n", __func__, iter, avg_cov);
+#endif
         total_covs = total_lens = 0;
         for (i = 0; i < n_seg; ++i) {
             if (g->vtx[i].del) continue;
-            total_lens += asg->seg[i].len * copy_number[i];
-            total_covs += (double) asg->seg[i].len * asg->seg[i].cov / copy_number[i];
+            total_lens += (double) asg->seg[i].len * copy_number[i];
+            total_covs += (double) asg->seg[i].len * asg->seg[i].cov;
         }
+        // FIXME total_lens could be zero
         new_avg_cov = MAX(total_covs / total_lens, min_avg_cov);
         if (fabs(new_avg_cov - avg_cov) < FLT_EPSILON) 
             break; // converged
         avg_cov = new_avg_cov;
         for (i = 0; i < n_seg; ++i) {
             if (g->vtx[i].del) continue;
-            copy_number[i] = MIN(MAX(1, lround((double) asg->seg[i].cov / avg_cov)), max_copy);
+            copy_number[i] = MIN(MAX(min_copy, lround((double) asg->seg[i].cov / avg_cov)), max_copy);
         }
     }
 
@@ -350,6 +426,20 @@ double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number,
 }
 
 #define DVAL(var) ((var)->D)
+// with BALANCE_IN_OUT defined
+// the objective function considers balanced indegree and outdegree
+#define BALANCE_IN_OUT
+#ifdef BALANCE_IN_OUT
+#define FVAL(fun) do { \
+    int __i, __n = (fun)->N; \
+    double __val[2] = {.0, .0}; \
+    for (__i = 0; __i < __n; ++__i) \
+        __val[(fun)->V[__i]&1] += DVAL((fun)->VAR[(fun)->V[__i]>>1]); \
+    (fun)->VAL = (fun)->weight * (fabs((fun)->v_exp - __val[0]) / 2 + \
+            fabs((fun)->v_exp - __val[1]) / 2 + \
+            fabs(__val[0] - __val[1])); \
+} while (0)
+#else
 #define FVAL(fun) do { \
     int __i, __n = (fun)->N; \
     double __val = (fun)->v_exp; \
@@ -357,6 +447,7 @@ double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number,
         __val -= DVAL((fun)->VAR[(fun)->V[__i]]); \
     (fun)->VAL = (fun)->weight * __val * __val; \
 } while (0)
+#endif
 
 typedef struct var {
     int B, D;
@@ -531,6 +622,11 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     }
 #endif
 
+    if (n_group == 0) {
+        free(arc_group);
+        return 0;
+    }
+
 #ifdef DEBUG_SEG_COV_ADJUST
     fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] sequence copy number BEFORE adjusted by graph layout\n", __func__);
     for (i = 0; i < n_seg; ++i) {
@@ -543,6 +639,7 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     uint32_t *arc_copy_lb, *arc_copy_ub, vlb, wlb, lb, ub;
     MYCALLOC(arc_copy_lb, n_group); // arc copy number lower bound
     MYCALLOC(arc_copy_ub, n_group); // arc copy number upper bound
+
     // calculate lower and upper boundary of arc copy number for each arc group
     for (i = 0; i < g->n_arc; ++i) {
         a = &g->arc[i];
@@ -564,7 +661,7 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
         arc_copy_lb[a_g] = MIN(lb, arc_copy_lb[a_g]);
         arc_copy_ub[a_g] = MAX(ub, arc_copy_ub[a_g]);
     }
-    
+
     // make variable list
     var_t **VAR;
     MYCALLOC(VAR, n_group);
@@ -588,7 +685,7 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
         var0->next = VAR[i];
         VAR[i]->prev = var0;
     }
-    
+
     // make objective function list
     kvec_t(func_t) funcs;
     kv_init(funcs);
@@ -598,6 +695,36 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del)
             continue;
+#ifdef BALANCE_IN_OUT
+        // with BALNCE_IN_OUT defined
+        // the incoming and outgoing arcs of a vertex
+        // are put in the same objective function unit
+        // and marked by the last bit of V
+        kvec_t(int) V = {0, 0 ,0};
+        for (k = 0; k < 2; ++k) {
+            v = i << 1 | k;
+            na = asmg_arc_n(g, v);
+            av = asmg_arc_a(g, v);
+            for (j = 0; j < na; ++j) {
+                if (av[j].del)
+                    continue;
+                link_id = av[j].link_id;
+                a_g = arc_group[link_id];
+                assert(a_g != (uint32_t) -1);
+                kv_push(int, V, (int) (a_g << 1 | k));
+            }
+        }
+        if (V.n) {
+            MYREALLOC(V.a, V.n);
+            kv_pushp(func_t, funcs, &FUN);
+            FUN->weight = log10(asg->seg[i].len);
+            FUN->v_exp = copy_number[i];
+            FUN->VAR = VAR;
+            FUN->N = V.n;
+            FUN->V = V.a;
+            FUN->VAL = 0.;
+        }
+#else
         for (k = 0; k < 2; ++k) {
             v = i << 1 | k;
             na = asmg_arc_n(g, v);
@@ -622,8 +749,9 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
                 FUN->VAL = 0.;
             }
         }
+#endif
     }
- 
+
     // do optimization
     int *arc_copy;
     int64_t sol_space_size;
@@ -633,9 +761,17 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
         sol_space_size *= (arc_copy_ub[i] - arc_copy_lb[i] + 1);
     if (sol_space_size <= BRUTE_FORCE_N_LIM) {
         // do brute force optimization
+#ifdef DEBUG_SEG_COV_ADJUST
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] run brute force searching: %ld\n",
+                __func__, sol_space_size);
+#endif
         estimate_arc_copy_number_brute_force_impl(funcs.a, funcs.n, VAR, n_group, arc_copy, sol_space_size);
     } else {
         // do simulated annealing optimization
+#ifdef DEBUG_SEG_COV_ADJUST
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] run simulated annealing optimization: %ld\n",
+                __func__, sol_space_size);
+#endif
         estimate_arc_copy_number_siman_impl(funcs.a, funcs.n, VAR, n_group, arc_copy);
     }
 
@@ -651,11 +787,17 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del)
             continue;
+#ifdef DEBUG_SEG_COV_ADJUST
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] #### sequence %s ####\n", __func__, asg->seg[i].name);
+#endif
         for (k = 0; k < 2; ++k) {
             v = i << 1 | k;
             na = asmg_arc_n(g, v);
             av = asmg_arc_a(g, v);
             new_copy[k] = 0;
+#ifdef DEBUG_SEG_COV_ADJUST
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] #### %sing arcs\n", __func__, k? "incom" : "outgo");
+#endif
             for (j = 0; j < na; ++j) {
                 if (av[j].del)
                     continue;
@@ -663,8 +805,18 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
                 a_g = arc_group[link_id];
                 assert(a_g != (uint32_t) -1);
                 new_copy[k] += arc_copy[a_g];
+#ifdef DEBUG_SEG_COV_ADJUST
+                fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] %s%c -> %s%c: %d\n", __func__, 
+                        asg->seg[av[j].v>>1].name, "+-"[av[j].v&1],
+                        asg->seg[av[j].w>>1].name, "+-"[av[j].w&1],
+                        arc_copy[a_g]);
+#endif
             }
         }
+#ifdef DEBUG_SEG_COV_ADJUST
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] indegree: %d;  outdegree: %d; diff: %d\n", __func__, 
+                new_copy[1], new_copy[0], abs(new_copy[1] - new_copy[0]));
+#endif
         // only update copy number if indegree matches outdegree
         // TODO better strategy to update sequence copy number
         if (new_copy[0] == new_copy[1] && copy_number[i] != new_copy[0]) {
@@ -711,7 +863,7 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     return updated;
 }
 
-kh_u32_t *sequence_duplication_by_copy_number(asg_t *asg, int *copy_number)
+kh_u32_t *sequence_duplication_by_copy_number(asg_t *asg, int *copy_number, int allow_del)
 {
     uint32_t i, n_seg;
     int copy;
@@ -730,6 +882,13 @@ kh_u32_t *sequence_duplication_by_copy_number(asg_t *asg, int *copy_number)
 #ifdef DEBUG_SEG_COPY
             fprintf(stderr, "[DEBUG_SEG_COPY::%s] make %d extra cop%s of %s [%u %u]\n", __func__, 
                     copy, copy > 1? "ies" : "y", asg->seg[i].name, asg->seg[i].len, asg->seg[i].cov);
+#endif
+        } else if (copy == 0 && allow_del) {
+            /*** TODO is this safe? **/
+            asmg_vtx_del(g, i, 1);
+#ifdef DEBUG_SEG_COPY
+            fprintf(stderr, "[DEBUG_SEG_COPY::%s] delete seg %s [%u %u]\n", __func__,
+                    asg->seg[i].name, asg->seg[i].len, asg->seg[i].cov);
 #endif
         }
     }
@@ -1094,13 +1253,13 @@ path_t make_path_from_str(asg_t *asg, char *path_str, char *sid)
         wlen += (double) cov * len1;
         a = asmg_arc1(g, vt.a[i-1], vt.a[i]);
         if (!a) {
-            fprintf(stderr, "[E::%s] link does not exist: %s%c -> %s%c\n", __func__,
+            fprintf(stderr, "[W::%s] gap introduced as link does not exist: %s%c -> %s%c\n", __func__,
                     asg->seg[vt.a[i-1]>>1].name, "+-"[vt.a[i-1]&1],
                     asg->seg[vt.a[i]>>1].name, "+-"[vt.a[i]&1]);
-            exit(EXIT_FAILURE);
+        } else {
+            len -= a->lo;
+            wlen -= (double) cov * a->lo;
         }
-        len -= a->lo;
-        wlen -= (double) cov * a->lo;
     }
 
     path_t path = {sid? strdup1(sid, strlen(sid)) : 0, vt.n, circ, 0, vt.a, len, wlen, .0};
@@ -1422,9 +1581,19 @@ static void put_chars(char *seq, int len, int rv, int ow, FILE *fo, uint64_t *l,
     }
 }
 
-void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int line_wd)
+static void make_gap(FILE *fo, uint64_t *l, int line_wd, int gap_size)
 {
-    uint32_t i, n, v, lo, cov;
+    int i;
+    for (i = 0; i < gap_size; ++i) {
+        fputc('N', fo);
+        if (++(*l) % line_wd == 0)
+            fputc('\n', fo);
+    }
+}
+
+void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int line_wd, int gap_size)
+{
+    uint32_t i, n, v, lo, cov, n_gap;
     uint64_t l;
     asmg_t *g;
     asmg_arc_t *a;
@@ -1465,15 +1634,21 @@ void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int
     v = path->v[0];
     put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, (force_linear || !path->circ)? 0 : asmg_arc1(g, path->v[n-1], v)->lo, fo, &l, line_wd);
 
+    n_gap = 0;
     for (i = 1; i < n; ++i) {
         v = path->v[i];
         a = asmg_arc1(g, path->v[i-1], v);
-        assert(!!a);
-        put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, a->lo, fo, &l, line_wd);
+        if (!!a) {
+            put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, a->lo, fo, &l, line_wd);
+        } else {
+            make_gap(fo, &l, line_wd, gap_size);
+            put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, 0, fo, &l, line_wd);
+            ++n_gap;
+        }
     }
 
     if (!path->circ || !force_linear)
-        assert(l == path->len);
+        assert(l - (uint64_t) n_gap * gap_size == path->len);
     if (l % line_wd != 0)
         fputc('\n', fo);
 }
@@ -1521,7 +1696,7 @@ uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq
             j = k;
     }
     
-    if (fo) print_seq(g, &paths->a[j], fo, seq_id > 0? seq_id : 1, 0, 60);
+    if (fo) print_seq(g, &paths->a[j], fo, seq_id > 0? seq_id : 1, 0, 60, 100);
 
     return j;
 }
@@ -1534,7 +1709,7 @@ void print_all_best_seqs(asg_t *g, path_v *paths, FILE *fo)
     size_t i;
     for (i = 0; i < paths->n; ++i)
         if (!!paths->a[i].best)
-            print_seq(g, &paths->a[i], fo, i, 0, 60);
+            print_seq(g, &paths->a[i], fo, i, 0, 60, 100);
 }
 
 
@@ -1568,9 +1743,11 @@ void asg_destroy(asg_t *g)
     uint64_t i;
     for (i = 0; i < g->n_seg; ++i)
         asg_seg_destroy(&g->seg[i]);
+    free(g->seg);
     // key has been freed by asg_seg_destroy
     if (g->h_seg) kh_sdict_destroy(g->h_seg);
     if (g->asmg) asmg_destroy(g->asmg);
+    free(g);
 }
 
 uint32_t asg_add_seg(asg_t *g, char *name, int allow_dups)
@@ -1626,6 +1803,32 @@ static void asg_update_seg_seq(asg_seg_t *seg, uint32_t l, char *s)
     seg->cov = 0;
 }
 
+asmg_t *asg_make_asmg_copy(asmg_t *g, asmg_t *_g)
+{
+    asmg_t *g1;
+    
+    if (_g)
+        g1 = _g;
+    else
+        MYCALLOC(g1, 1);
+    
+    g1->n_vtx = g1->m_vtx = g->n_vtx;
+    MYCALLOC(g1->vtx, g1->n_vtx);
+    // this works as a and seq are always 0
+    memcpy(g1->vtx, g->vtx, sizeof(asmg_vtx_t) * g1->n_vtx);
+    g1->n_arc = g1->m_arc = g->n_arc;
+    MYCALLOC(g1->arc, g1->n_arc);
+    memcpy(g1->arc, g->arc, sizeof(asmg_arc_t) * g1->n_arc);
+
+    uint64_t n_vtx = asmg_vtx_n(g1);
+    MYCALLOC(g1->idx_p, n_vtx);
+    memcpy(g1->idx_p, g->idx_p, sizeof(uint64_t) * n_vtx);
+    MYCALLOC(g1->idx_n, n_vtx);
+    memcpy(g1->idx_n, g->idx_n, sizeof(uint64_t) * n_vtx);
+    
+    return g1;
+}
+
 asg_t *asg_make_copy(asg_t *asg)
 {
     uint64_t i;
@@ -1647,22 +1850,7 @@ asg_t *asg_make_copy(asg_t *asg)
         k = kh_sdict_put(h_seg, seg1->name, &absent);
         kh_val(h_seg, k) = i;
     }
-    asmg_t *g, *g1;
-    g = asg->asmg;
-    g1 = asg1->asmg;
-    g1->n_vtx = g1->m_vtx = g->n_vtx;
-    MYCALLOC(g1->vtx, g1->n_vtx);
-    // this works as a and seq are always 0
-    memcpy(g1->vtx, g->vtx, sizeof(asmg_vtx_t) * g1->n_vtx);
-    g1->n_arc = g1->m_arc = g->n_arc;
-    MYCALLOC(g1->arc, g1->n_arc);
-    memcpy(g1->arc, g->arc, sizeof(asmg_arc_t) * g1->n_arc);
-    
-    uint64_t n_vtx = asmg_vtx_n(g1);
-    MYCALLOC(g1->idx_p, n_vtx);
-    memcpy(g1->idx_p, g->idx_p, sizeof(uint64_t) * n_vtx);
-    MYCALLOC(g1->idx_n, n_vtx);
-    memcpy(g1->idx_n, g->idx_n, sizeof(uint64_t) * n_vtx);
+    asg_make_asmg_copy(asg->asmg, asg1->asmg);
 
     return asg1;
 }
@@ -1681,30 +1869,25 @@ int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, in
 
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
-        if (visited[i]) continue;
-        asg_subgraph(asg, &i, 1, 0, 0);
-        avg_cov = estimate_sequence_copy_number_from_coverage(asg, 0, max_copy);
+        if (visited[i] || g->vtx[i].del) continue;
+        asg->asmg = asg_make_asmg_copy(g, 0);
+        uint32_t *vlist = asmg_subgraph(asg->asmg, &i, 1, 0, 0, 0, 1);
+        free(vlist);
+        avg_cov = estimate_sequence_copy_number_from_coverage(asg, 0, min_cf, 0, max_copy);
         for (j = 0; j < n_seg; ++j) {
-            if (g->vtx[j].del) continue;
+            if (asg->asmg->vtx[j].del) continue;
             if (avg_cov && asg->seg[j].cov / avg_cov < min_cf)
                 kv_push(uint32_t, rm_v, j);
             visited[j] = 1;
         }
+        asmg_destroy(asg->asmg);
     }
+    asg->asmg = g; // roll back
 
     nv = rm_v.n;
-    // restore all vtx and arc
-    // except for arcs linked to vtx to clean
-    for (i = 0; i < g->n_arc; ++i)
-        g->arc[i].del = 0;
     for (i = 0; i < nv; ++i)
         asmg_vtx_del(g, rm_v.a[i], 1);
-    for (i = 0; i < n_seg; ++i)
-        g->vtx[i].del = 0;
-    asmg_finalize(g, 1);
-
-    kv_destroy(rm_v);
-    free(visited);
+    asmg_finalize(g, 0);
 
     if (verbose > 1) {
         if (verbose > 2) {
@@ -1712,9 +1895,14 @@ int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, in
             asg_print(asg, stderr, 1);
         }
         fprintf(stderr, "[M::%s] number sequence cleaned: %u\n", __func__, nv);
+        for (i = 0; i < nv; ++i)
+            fprintf(stderr, "[M::%s] %s removed\n", __func__, asg->seg[rm_v.a[i]].name);
         fprintf(stderr, "[M::%s] graph stats after cleaning\n", __func__);
         asg_stat(asg, stderr);
     }
+    
+    kv_destroy(rm_v);
+    free(visited);
 
     return nv;
 }
@@ -1750,9 +1938,9 @@ static double gfa_aux_decimal_value(uint8_t *aux)
     else if (*aux == 'C') val = aux_decimal_val(uint8_t, aux + 1);
     else if (*aux == 's') val = aux_decimal_val(int16_t, aux + 1);
     else if (*aux == 'S') val = aux_decimal_val(uint16_t, aux + 1);
-    else if (*aux == 'i') val = aux_decimal_val(int32_t, aux + 1);
-    else if (*aux == 'I') val = aux_decimal_val(uint32_t, aux + 1);
-    else if (*aux == 'f') val = aux_decimal_val(float, aux + 1);
+    else if (*aux == 'i') val = aux_decimal_val(int64_t, aux + 1);
+    else if (*aux == 'I') val = aux_decimal_val(uint64_t, aux + 1);
+    else if (*aux == 'f') val = aux_decimal_val(double, aux + 1);
     return val;
 }
 
@@ -1760,7 +1948,7 @@ static inline int gfa_aux_type2size(int x)
 {
     if (x == 'C' || x == 'c' || x == 'A') return 1;
     else if (x == 'S' || x == 's') return 2;
-    else if (x == 'I' || x == 'i' || x == 'f') return 4;
+    else if (x == 'I' || x == 'i' || x == 'f') return 8;
     else return 0;
 }
 
@@ -1821,13 +2009,13 @@ static int gfa_aux_parse(char *s, uint8_t **data, int *max)
                     kputc_('A', &str);
                     kputc_(*q, &str);
                 } else if (type == 'i') {
-                    int32_t x;
-                    x = strtol(q, &q, 10);
-                    kputc_(type, &str); kputsn_((char*)&x, 4, &str);
+                    int64_t x;
+                    x = strtoll(q, &q, 10);
+                    kputc_(type, &str); kputsn_((char*)&x, 8, &str);
                 } else if (type == 'f') {
-                    float x;
+                    double x;
                     x = strtod(q, &q);
-                    kputc_('f', &str); kputsn_(&x, 4, &str);
+                    kputc_('f', &str); kputsn_(&x, 8, &str);
                 } else if (type == 'Z') {
                     kputc_('Z', &str); kputsn_(q, p - q + 1, &str); // note that this include the trailing NULL
                 } else if (type == 'B') {
@@ -1839,13 +2027,13 @@ static int gfa_aux_parse(char *s, uint8_t **data, int *max)
                             if (*r == ',') ++n;
                         kputc_('B', &str); kputc_(type, &str); kputsn_(&n, 4, &str);
                         // TODO: to evaluate which is faster: a) aligned array and then memmove(); b) unaligned array; c) kputsn_()
-                        if (type == 'c')      while (q + 1 < p) { int8_t   x = strtol(q + 1, &q, 0); kputc_(x, &str); }
-                        else if (type == 'C') while (q + 1 < p) { uint8_t  x = strtol(q + 1, &q, 0); kputc_(x, &str); }
-                        else if (type == 's') while (q + 1 < p) { int16_t  x = strtol(q + 1, &q, 0); kputsn_(&x, 2, &str); }
-                        else if (type == 'S') while (q + 1 < p) { uint16_t x = strtol(q + 1, &q, 0); kputsn_(&x, 2, &str); }
-                        else if (type == 'i') while (q + 1 < p) { int32_t  x = strtol(q + 1, &q, 0); kputsn_(&x, 4, &str); }
-                        else if (type == 'I') while (q + 1 < p) { uint32_t x = strtol(q + 1, &q, 0); kputsn_(&x, 4, &str); }
-                        else if (type == 'f') while (q + 1 < p) { float    x = strtod(q + 1, &q);    kputsn_(&x, 4, &str); }
+                        if (type == 'c')      while (q + 1 < p) { int8_t   x = strtol(q + 1, &q, 0);  kputc_(x, &str); }
+                        else if (type == 'C') while (q + 1 < p) { uint8_t  x = strtol(q + 1, &q, 0);  kputc_(x, &str); }
+                        else if (type == 's') while (q + 1 < p) { int16_t  x = strtol(q + 1, &q, 0);  kputsn_(&x, 2, &str); }
+                        else if (type == 'S') while (q + 1 < p) { uint16_t x = strtol(q + 1, &q, 0);  kputsn_(&x, 2, &str); }
+                        else if (type == 'i') while (q + 1 < p) { int64_t  x = strtoll(q + 1, &q, 0); kputsn_(&x, 8, &str); }
+                        else if (type == 'I') while (q + 1 < p) { uint64_t x = strtoll(q + 1, &q, 0); kputsn_(&x, 8, &str); }
+                        else if (type == 'f') while (q + 1 < p) { double   x = strtod(q + 1, &q);     kputsn_(&x, 8, &str); }
                     }
                 } // should not be here, as we have tested all types
             }
@@ -1912,7 +2100,7 @@ static inline int gfa_parse_S(asg_t *g, char *s)
         l_aux = gfa_aux_parse(rest, &aux, &m_aux); // parse optional tags
         s_LN = l_aux? gfa_aux_get(l_aux, aux, "LN") : 0;
         if (s_LN && s_LN[0] == 'i')
-            LN = *(int32_t*)(s_LN + 1);
+            LN = *(int64_t*)(s_LN + 1);
         if (seq == 0) {
             if (LN > 0) len = LN;
         } else {
@@ -1948,11 +2136,11 @@ static inline int gfa_parse_S(asg_t *g, char *s)
                 // check KC and FC
                 s_SBP_COV = gfa_aux_get(l_aux, aux, "KC");
                 if (s_SBP_COV && *s_SBP_COV == 'i') {
-                    dv = *(int32_t*)(s_SBP_COV + 1);
+                    dv = *(int64_t*)(s_SBP_COV + 1);
                 } else {
                     s_SBP_COV = gfa_aux_get(l_aux, aux, "FC");
                     if (s_SBP_COV && *s_SBP_COV == 'i')
-                        dv = *(int32_t*)(s_SBP_COV + 1);
+                        dv = *(int64_t*)(s_SBP_COV + 1);
                 }
                 s->cov = len > 0? dv/len : dv;
             }
@@ -2040,7 +2228,7 @@ static int gfa_parse_L(asg_t *g, char *s)
                 // check EC
                 s_ARC_COV = gfa_aux_get(l_aux, aux, "EC");
                 if (s_ARC_COV && *s_ARC_COV == 'i')
-                    arc->cov = *(int32_t*)(s_ARC_COV + 1);
+                    arc->cov = *(int64_t*)(s_ARC_COV + 1);
             }        
         }
         free(aux);
@@ -2356,7 +2544,6 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
     og_component_v *component_v;
     asmg_t *g;
 
-    g = asg->asmg;
     n_gene = annot_v->n;
     annots = annot_v->a;
     n_seg = asg->n_seg;
@@ -2394,8 +2581,10 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
     MYCALLOC(component_v, 1);
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
-        if (visited[i]) continue;
-        asg_subgraph(asg, &i, 1, 0, 0);
+        if (visited[i] || asg->asmg->vtx[i].del) continue;
+        g = asg_make_asmg_copy(asg->asmg, 0);
+        uint32_t *vlist = asmg_subgraph(g, &i, 1, 0, 0, 0, 1);
+        free(vlist);
         MYBZERO(annot_score, m_gene * 4);
         len = nv = 0;
         for (j = 0; j < n_seg; ++j) {
@@ -2483,6 +2672,8 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
             component->ng = comp_g.n;
             component->g = comp_g.a;
         }
+        
+        asmg_destroy(g);
 
         if (verbose > 0)
             fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
@@ -2552,7 +2743,6 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
     og_component_v *component_v;
     asmg_t *g;
 
-    g = asg->asmg;
     n_gene = annot_v->n;
     annots = annot_v->a;
     n_seg = asg->n_seg;
@@ -2591,8 +2781,10 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
     MYCALLOC(component_v, 1);
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
-        if (visited[i]) continue;
-        asg_subgraph(asg, &i, 1, 0, 0);
+        if (visited[i] || asg->asmg->vtx[i].del) continue;
+        g = asg_make_asmg_copy(asg->asmg, 0);
+        uint32_t *vlist = asmg_subgraph(g, &i, 1, 0, 0, 0, 1);
+        free(vlist);
         MYBZERO(a_s, 4);
         len = nv = 0;
         for (j = 0; j < n_seg; ++j) {
@@ -2659,6 +2851,8 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
             component->g = comp_g.a;
         }
 
+        asmg_destroy(g);
+
         if (verbose > 0)
             fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
                     __func__, asg->seg[i].name, nv, len, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI], og_t);
@@ -2679,6 +2873,7 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
 
 void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components, FILE *fo)
 {
+    if (!og_components) return;
     uint32_t i, j;
     og_component_t *component;
     for (i = 0; i < og_components->n; ++i) {

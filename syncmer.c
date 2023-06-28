@@ -40,8 +40,9 @@
 
 #undef DEBUG_KMER_EXTRACTION
 #undef DEBUG_S_KMER_GROUP
+#undef DEBUG_LINK_COVERAGE
 
-unsigned char seq_nt4_table[256] = {
+const unsigned char seq_nt4_table[256] = {
     0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
     4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
     4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
@@ -60,7 +61,7 @@ unsigned char seq_nt4_table[256] = {
     4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4
 };
 
-char char_nt4_table[4] = {'A', 'C', 'G', 'T'};
+const char char_nt4_table[4] = {'A', 'C', 'G', 'T'};
 
 // complementary seq of four base pairs packed in a uint8_t
 // (A,C,G,T) -> (0,1,2,3)
@@ -384,7 +385,7 @@ static void do_analysis(p_data_t *dat, pthread_t *threads, int n_threads, sr_v *
     return;
 }
 
-static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w)
+static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD)
 {
     p_data_t *dat;
     MYCALLOC(dat, 1);
@@ -397,15 +398,25 @@ static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w)
     dat->w = w;
     kv_init(dat->sr);
 
+    if (mD == 0)
+        mD = SIZE_MAX;
+
     int l;
     uint64_t i;
+    size_t D;
     i = 0;
+    D = 0;
     while ((l = sstream_read(s_stream)) >= 0) {
         dat->sid[0] = i++;
         dat->name[0] = strdup(s_stream->s->ks->name.s);
         dat->seq[0] = strdup(s_stream->s->ks->seq.s);
         dat->len[0] = l;
         sr_read_analysis_thread(dat);
+        D += l;
+        if (D >= mD) {
+            fprintf(stderr, "[M::%s] data limit (%lu) reached. Discard the remaining sequences...\n", __func__, mD);
+            break;
+        }
     }
 
     if (sr->n) free(sr->a);
@@ -422,16 +433,20 @@ static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w)
     return;
 }
 
-void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, int n_threads)
+void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD, int n_threads)
 {
     if (n_threads == 1) {
-        sr_read_single_thread(s_stream, sr, k, w);
+        sr_read_single_thread(s_stream, sr, k, w, mD);
         return;
     }
+
+    if (mD == 0)
+        mD = SIZE_MAX;
 
     p_data_t *dat;
     int t;
     uint64_t batch_n;
+    size_t D;
     
     MYCALLOC(dat, n_threads);
     batch_n = 10000;
@@ -451,6 +466,7 @@ void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, int n_threads)
     int l;
     uint64_t i, j, n;
     i = j = n = 0;
+    D = 0;
     while ((l = sstream_read(s_stream)) >= 0) {
         t = j / batch_n;
         n = dat[t].n_reads;
@@ -464,6 +480,12 @@ void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, int n_threads)
         if (j == batch_n * n_threads) {
             do_analysis(dat, threads, n_threads, sr);
             j = 0;
+        }
+
+        D += l;
+        if (D >= mD) {
+            fprintf(stderr, "[M::%s] data limit (%lu) reached. Discard the remaining sequences...\n", __func__, mD);
+            break;
         }
     }
     if (j > 0) do_analysis(dat, threads, n_threads, sr);
@@ -552,7 +574,8 @@ static double kh_ctab_stat(kh_ctab_t *ctab, int *uniq, int *singleton)
         }
     }
     k = kh_ctab_get(ctab, 1);
-    if (kh_exist(ctab, k)) c = kh_val(ctab, k);
+    if (k < kh_end(ctab))
+        c = kh_val(ctab, k);
 
 do_assign:
     if (uniq) *uniq = n;
@@ -799,13 +822,14 @@ void sr_stat(sr_v *sr, sr_stat_t *stats, int w, FILE *fo, int verbose)
     for (i = 0; i < n; ++i) {
         sr_t s = sr->a[i];
         m += s.n;
-        p0 = p1 = -1;
+        p0 = p1 = MAX_RD_LEN;
         for (j = 0; j < s.n; ++j) {
             syncmer_t a = {s.k_mer_h[j], s.s_mer[j], 0, 0, 0};
             kv_push(syncmer_t, syncmers, a);
             p0 = p1;
             p1 = s.m_pos[j] >> 1;
-            if (p0 >= 0) kh_ctab_put1(dist_ctab, p1 - p0 - w);
+            if (p0 != (int) MAX_RD_LEN && p1 != (int) MAX_RD_LEN)
+                kh_ctab_put1(dist_ctab, p1 - p0 - w);
         }
     }
 
@@ -970,6 +994,7 @@ void sr_v_destroy(sr_v *sr_v)
     for (i = 0; i < sr_v->n; ++i)
         sr_destroy(&sr_v->a[i]);
     kv_destroy(*sr_v);
+    free(sr_v);
 }
 
 static void fputs_smer(uint64_t s, int k, FILE *fo)
@@ -1025,6 +1050,7 @@ static void fputs_kmer(uint8_t *s, uint32_t p, int w, FILE *fo)
 void print_syncmer_on_seq(sr_t *sr, uint32_t n, int k, int w, FILE *fo)
 {
     if (n >= sr->n) return;
+    if ((sr->m_pos[n]>>1) == MAX_RD_LEN) return; // this is a corrected mer
     fprintf(fo, ">%lu_%d_%u_%lu_%u\t", sr->sid, n, sr->m_pos[n] >> 1, sr->s_mer[n] & 1, sr->m_pos[n] & 1);
     fprintf(fo, "RD:Z:%lu\t", sr->sid);
     fprintf(fo, "MM:Z:");
@@ -1041,10 +1067,467 @@ void print_all_syncmers_on_seq(sr_t *sr, int k, int w, FILE *fo)
     for (i = 0; i < sr->n; ++i) print_syncmer_on_seq(sr, i, k, w, fo);
 }
 
+void print_aligned_syncmers_on_seq(sr_t *sr, int w, uint32_t beg, uint32_t end, FILE *fo)
+{
+    uint32_t i, j, l, n, p;
+    kstring_t s = {0, 0, 0};
+    l = sr->hoco_l;
+    n = sr->n;
+    end = MIN(end, n);
+    get_hoco_seq(sr, &s);
+    fprintf(fo, "%.*s\n", (int) s.l, s.s);
+    for (i = beg; i < end; ++i) {
+        p = sr->m_pos[i]>>1;
+        if (p == MAX_RD_LEN) continue;
+        for (j = 0; j < p; ++j) fputc('*', fo);
+        fprintf(fo, "%.*s", w, &s.s[p]);
+        for (j = p + w; j < l; ++j) fputc('*', fo);
+        fputc('\n', fo);
+    }
+    free(s.s);
+}
+
 void print_hoco_seq(sr_t *sr, FILE *fo)
 {
     uint32_t i;
     for (i = 0; i < sr->hoco_l; ++i) fputc(char_nt4_table[(sr->hoco_s[i/4]>>(((i&3)^3)<<1)) & 3], fo);
     fputc('\n', fo);
+}
+
+void get_hoco_seq(sr_t *sr, kstring_t *s)
+{
+    uint32_t i;
+    s->l = 0;
+    for (i = 0; i < sr->hoco_l; ++i) kputc_(char_nt4_table[(sr->hoco_s[i/4]>>(((i&3)^3)<<1)) & 3], s);
+}
+
+void get_kmer_seq(uint8_t *hoco_s, uint32_t pos, int l, uint32_t rev, uint8_t *kmer_s)
+{
+    int i, j;
+    uint8_t t;
+    uint32_t p;
+    for (i = 0; i < l; ++i) {
+        p = pos + i;
+        kmer_s[i] = (hoco_s[p/4]>>(((p&3)^3)<<1))&3;
+    }
+    if (rev) {
+        for (i = 0, j = l - 1; i < j; ++i, --j) {
+            t = kmer_s[i];
+            kmer_s[i] = (kmer_s[j]^3)&3;
+            kmer_s[j] = (t^3)&3;
+        }
+        if (i == j) kmer_s[i] = (kmer_s[i]^3)&3;
+    }
+}
+
+typedef struct {uint128_t h; uint64_t s; uint64_t m_pos;} syncmer1_t;
+
+static int syncmer1_h_cmpfunc(const void *a, const void *b)
+{
+    uint128_t x, y;
+    uint64_t s, t;
+    x = ((syncmer1_t *) a)->h;
+    y = ((syncmer1_t *) b)->h;
+    s = ((syncmer1_t *) a)->s;
+    t = ((syncmer1_t *) b)->s;
+    return x == y? (s == t? 0 : (s > t? 1 : -1)) : (x > y? 1 : -1);
+}
+
+syncmer_t *collect_syncmer_from_reads(sr_v *sr, uint64_t *n)
+{
+    size_t i, j;
+    uint32_t c;
+    uint64_t n1, n2;
+    sr_t *s;
+    kvec_t(syncmer1_t) scm1;
+    kv_init(scm1);
+    n1 = 0;
+    for (i = 0; i < sr->n; ++i) {
+        s = &sr->a[i];
+        assert(s->sid == i);
+        n1 += s->n;
+        for (j = 0; j < s->n; ++j) {
+            syncmer1_t s1 = {s->k_mer_h[j], s->s_mer[j], (s->sid << 32) | (j << 1) | (s->m_pos[j] & 1)};
+            kv_push(syncmer1_t, scm1, s1);
+        }
+    }
+    if (scm1.n == 0) {
+        kv_destroy(scm1);
+        if (n) *n = 0;
+        return 0;
+    }
+
+    qsort(scm1.a, scm1.n, sizeof(syncmer1_t), syncmer1_h_cmpfunc);
+
+    // pack syncmers by kmer hash128
+    kvec_t(syncmer_t) scm;
+    kv_init(scm);
+    uint128_t h128 = scm1.a[0].h;
+    uint64_t s64 = scm1.a[0].s;
+    c = 1;
+    for (i = 1; i < scm1.n; ++i) {
+        if (scm1.a[i].h == h128) {
+            ++c;
+            // syncmers with same hash values should have same smers
+            if (scm1.a[i].s != s64) {
+                fprintf(stderr, "[E::%s] identical kmers have different smers\n", __func__);
+                fprintf(stderr, "[E::%s] kmer hash: %064lu%064lu\n", __func__, (uint64_t) (h128>>64), (uint64_t) h128);
+                fprintf(stderr, "[E::%s] smer code: %lu\n", __func__, s64);
+                for (j = i + 1 - c; j <= i; ++j) {
+                    syncmer1_t *m = &scm1.a[j];
+                    fprintf(stderr, "[E::%s] %064lu%064lu %lu %lu %llu %u\n", __func__,
+                            (uint64_t) (m->h>>64), (uint64_t) m->h, m->s, m->m_pos>>32, m->m_pos>>1&MAX_RD_SCM,
+                            sr->a[m->m_pos>>32].m_pos[m->m_pos>>1&MAX_RD_SCM]>>1);
+                }
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            uint64_t *m_pos;
+            MYMALLOC(m_pos, c);
+            for (j = i - c; j < i; ++j)
+                m_pos[j+c-i] = scm1.a[j].m_pos;
+            syncmer_t s1 = {h128, s64, m_pos, c, 0};
+            kv_push(syncmer_t, scm, s1);
+
+            h128 = scm1.a[i].h;
+            s64 = scm1.a[i].s;
+            c = 1;
+        }
+    }
+
+    uint64_t *m_pos;
+    MYMALLOC(m_pos, c);
+    for (j = i - c; j < i; ++j)
+        m_pos[j+c-i] = scm1.a[j].m_pos;
+    syncmer_t s1 = {h128, s64, m_pos, c, 0};
+    kv_push(syncmer_t, scm, s1);
+
+    n2 = 0;
+    for (i = 0; i < scm.n; ++i) n2 += scm.a[i].k_cov;
+
+    assert(n1 == n2);
+
+    kv_destroy(scm1);
+
+    MYREALLOC(scm.a, scm.n);
+
+    if (n) *n = scm.n;
+    return scm.a;
+}
+
+static void syncmer_vec_destroy(syncmer_t *s, size_t n)
+{
+    if (s) {
+        size_t i;
+        for (i = 0; i < n; ++i)
+            if (s[i].m_pos)
+                free(s[i].m_pos);
+        free(s);
+    }
+}
+
+static kh_inline khint_t kh_hash_uint128(uint128_t key)
+{
+    khint_t k1 = kh_hash_uint64((khint64_t) key);
+    khint_t k2 = kh_hash_uint64((khint64_t) (key >> 64));
+    return kh_hash_uint64((khint64_t) ((uint64_t) k1 << 32 | k2));
+}
+
+KHASHL_MAP_INIT(KH_LOCAL, kh_scm_t, kh_scm, uint128_t, uint64_t, kh_hash_uint128, kh_eq_generic)
+KHASHL_MAP_INIT(KH_LOCAL, kh_kcn_t, kh_kcn, uint64_t, int, kh_hash_uint64, kh_eq_generic)
+
+static inline void kh_scm_add(kh_scm_t *h, uint128_t v_p, uint64_t c)
+{
+    int absent;
+    khint_t k;
+    k = kh_scm_put(h, v_p, &absent);
+    if (absent)
+        kh_val(h, k) = 0;
+    kh_val(h, k) += c;
+    return;
+}
+
+static inline void kh_kcn_put1(kh_kcn_t *k_cn, uint64_t key)
+{
+    int absent;
+    khint_t k;
+    k = kh_kcn_put(k_cn, key, &absent);
+    if (absent)
+        kh_val(k_cn, k) = 1;
+    else
+        ++kh_val(k_cn, k);
+}
+
+static inline int kh_kcn_get1(kh_kcn_t *k_cn, uint64_t key)
+{
+    khint_t k;
+    k = kh_kcn_get(k_cn, key);
+    if (k < kh_end(k_cn))
+        return kh_val(k_cn, k);
+    else
+        return 0;
+}
+
+typedef struct {uint32_t c, l; double f;} pt1_t;
+
+static int pt1_f_cmpfunc(const void *a, const void *b)
+{
+    return (((pt1_t *) a)->f > ((pt1_t *) b)->f) - (((pt1_t *) a)->f < ((pt1_t *) b)->f);
+}
+
+/***
+static int pt1_c_cmpfunc(const void *a, const void *b)
+{
+    return (((pt1_t *) a)->c > ((pt1_t *) b)->c) - (((pt1_t *) a)->c < ((pt1_t *) b)->c);
+}
+
+static int pt1_l_cmpfunc(const void *a, const void *b)
+{
+    return (((pt1_t *) a)->l > ((pt1_t *) b)->l) - (((pt1_t *) a)->l < ((pt1_t *) b)->l);
+}
+**/
+
+int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_seq, uint32_t min_pt, 
+        double min_f, double **_beta, double **_bse, double **_r2, int verbose)
+{
+    uint64_t i, j, n_scm;
+    syncmer_t *scm;
+    
+    min_pt = MAX(min_pt, 30);
+    min_f  = MAX(min_f,  .0);
+
+    // collect all syncmers
+    scm = collect_syncmer_from_reads(sr, &n_scm);
+    
+    // build syncmer hash h128 to id map
+    int absent;
+    khint_t k;
+    kh_scm_t *h_scm;
+    h_scm = kh_scm_init();
+    for (i = 0; i < n_scm; ++i) {
+        k = kh_scm_put(h_scm, scm[i].h, &absent);
+        kh_val(h_scm, k) = i;
+    }
+    
+    // collect read length - syncmer count
+    kh_ctab_t *rl_ctab;
+    int64_t *rl_cnts, *rd_cnts;
+    uint32_t max_n;
+    rl_ctab = kh_ctab_init();
+    max_n = 0;
+    for (i = 0; i < sr->n; ++i) {
+        max_n = MAX(max_n, sr->a[i].n);
+        kh_ctab_put1(rl_ctab, sr->a[i].n);
+    }
+    if (max_n == 0) {
+        syncmer_vec_destroy(scm, n_scm);
+        return 0;
+    }
+
+    rl_cnts = kh_ctab_cnt(rl_ctab, max_n);
+    kh_ctab_destroy(rl_ctab);
+    
+    // rl_cnts cumsum from end to beg
+    // rl_cnts size is max_n+1
+    for (i = 0; i < max_n; ++i)
+        rl_cnts[max_n-i-1] += rl_cnts[max_n-i];
+
+#ifdef DEBUG_LINK_COVERAGE
+    for (i = 0; i <= max_n; ++i)
+        fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] rl_cnts: %lu %ld\n", __func__, i, rl_cnts[i]);
+#endif
+
+    kh_scm_t *a_cov; // arc cov
+    kh_kcn_t *k_cn; // scm copy number
+    sr_t *s;
+    uint32_t a, c, v_v, n1, *pt_n;
+    uint64_t v0, v1, *scm_id;
+    uint128_t v_p;
+    double *beta, *bse, *r2, c0, c1;
+    kvec_t(pt1_t) pt1;
+    
+    a_cov = kh_scm_init();
+    k_cn = kh_kcn_init();
+    kv_init(pt1);
+    MYMALLOC(scm_id, max_n);
+    MYCALLOC(rd_cnts, max_n+1);
+    MYCALLOC(beta, max_n);
+    MYCALLOC(bse, max_n);
+    MYCALLOC(r2, max_n);
+    MYCALLOC(pt_n, max_n);
+    n1 = 0;
+    for (i = 2; i < max_n; ++i) {
+        if (rl_cnts[i] < min_n_seq) break;
+        // do coverage analysis
+        // the gap will be i-2
+        kh_scm_m_clear(a_cov);
+        for (j = 0; j < sr->n; ++j) {
+            s = &sr->a[j];
+            if (s->n < i) continue;
+            // collect scm_id along reads
+            for (a = 0; a < s->n; ++a)
+                scm_id[a] = kh_val(h_scm, kh_scm_get(h_scm, s->k_mer_h[a]));
+            // collect coverage
+            for (a = i-1; a < s->n; ++a) {
+                if (scm[scm_id[a+1-i]].k_cov < min_k_cov || 
+                        scm[scm_id[a]].k_cov < min_k_cov)
+                    continue;
+                v0 = scm_id[a+1-i] << 1 | (s->m_pos[a+1-i] & 1);
+                v1 = scm_id[a] << 1 | (s->m_pos[a] & 1);
+                v0 <= v1? kh_scm_add(a_cov, (uint128_t) v0 << 64 | v1, 1) :
+                    kh_scm_add(a_cov, ((uint128_t) v1^1) << 64 | (v0^1), 1);
+                // rd_cnts collects the pair number of a given gap in the data
+                ++rd_cnts[i];
+            }
+        }
+
+        if (i == 2) {
+            // kmer copy number estimation
+            for (k = (khint_t) 0; k < kh_end(a_cov); ++k) {
+                if (!kh_exist(a_cov, k)) continue;
+                v_p = kh_key(a_cov, k);
+                kh_kcn_put1(k_cn, (uint64_t) (v_p >> 65));
+                kh_kcn_put1(k_cn, ((uint64_t) v_p) >> 1);
+            }
+
+#ifdef DEBUG_LINK_COVERAGE
+            for (k = (khint_t) 0; k < kh_end(k_cn); ++k) {
+                if (!kh_exist(k_cn, k)) continue;
+                fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] k_cn: %lu %d\n", __func__, i-2, kh_val(k_cn, k));
+            }
+#endif
+        }
+
+#ifdef DEBUG_LINK_COVERAGE
+        if ((i-2) % 3 == 0) {
+            // print arc cov stats
+            for (k = (khint_t) 0; k < kh_end(a_cov); ++k) {
+                if (!kh_exist(a_cov, k)) continue;
+                v_p = kh_key(a_cov, k);
+                v_v = kh_val(a_cov, k);
+                v0 = (uint64_t) (v_p >> 65);
+                v1 = ((uint64_t) v_p) >> 1;
+                c0 = MAX(2, kh_kcn_get1(k_cn, v0)) / 2.0;
+                c1 = MAX(2, kh_kcn_get1(k_cn, v1)) / 2.0;
+                c = (uint32_t) (MIN(scm[v0].k_cov/c0, scm[v1].k_cov/c1));
+                v_v = MIN(v_v, c);
+                fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] lc_cnts: %lu %u %u\n", __func__, i-2, c, v_v);
+            }
+        }
+#endif
+
+        // collect covs
+        pt1.n = 0;
+        for (k = (khint_t) 0; k < kh_end(a_cov); ++k) {
+            if (!kh_exist(a_cov, k)) continue;
+            v_p = kh_key(a_cov, k);
+            v_v = kh_val(a_cov, k);
+            v0 = (uint64_t) (v_p >> 65);
+            v1 = ((uint64_t) v_p) >> 1;
+            c0 = MAX(2, kh_kcn_get1(k_cn, v0)) / 2.0;
+            c1 = MAX(2, kh_kcn_get1(k_cn, v1)) / 2.0;
+            c = (uint32_t) (MIN(scm[v0].k_cov/c0, scm[v1].k_cov/c1));
+            v_v = MIN(v_v, c);
+            pt1_t pt = {c, v_v, (double) v_v / c};
+            kv_push(pt1_t, pt1, pt);
+        }
+        
+        uint32_t beg, end;
+        /***
+        beg = floor(pt1.n * .01);
+        end =  ceil(pt1.n * .99);
+        // sort pt by c
+        qsort(pt1.a, pt1.n, sizeof(pt1_t), pt1_c_cmpfunc);
+        // mask the lower 1% and upper 1% of data
+        for (j = 0; j < beg; ++j) pt1.a[j].f = -1.0;
+        for (j = end; j < pt1.n; ++j) pt1.a[j].f = -1.0;
+        // sort pt by l
+        qsort(pt1.a, pt1.n, sizeof(pt1_t), pt1_l_cmpfunc);
+        // mask the lower 1% and upper 1% of data
+        for (j = 0; j < beg; ++j) pt1.a[j].f = -1.0;
+        for (j = end; j < pt1.n; ++j) pt1.a[j].f = -1.0;
+        **/
+        beg = floor(pt1.n * .05);
+        end =  ceil(pt1.n * .95);
+        // sort pt by l/c
+        qsort(pt1.a, pt1.n, sizeof(pt1_t), pt1_f_cmpfunc);
+        // estimate slope using the middle 90% data
+        while (beg < end && pt1.a[beg].f < min_f)
+            ++beg;
+        
+        if (end - beg < min_pt)
+            break;
+
+        if (verbose > 1) {
+            for (j = beg; j < end; ++j)
+                fprintf(stderr, "[M::%s] pt1: %lu %lu %u %u %.6f\n", __func__, i-2, j, pt1.a[j].c, pt1.a[j].l, pt1.a[j].f);
+        }
+
+        // do estimation
+        double xy, x2, ybar;
+        xy = x2 = ybar = .0;
+        for (j = beg; j < end; ++j) {
+            xy += (double) pt1.a[j].c * pt1.a[j].l;
+            x2 += (double) pt1.a[j].c * pt1.a[j].c;
+            ybar += pt1.a[j].l;
+        }
+        beta[i] = xy / x2;
+        ybar /= end - beg;
+        // calculate r2
+        double res, tot, r;
+        res = tot = .0;
+        for (j = beg; j < end; ++j) {
+            r = pt1.a[j].l - beta[i] * pt1.a[j].c;
+            res += r * r;
+            r = pt1.a[j].l - ybar;
+            tot += r * r;
+        }
+        bse[i] = sqrt(res / x2 / (end - beg - 1));
+        r2[i] = 1 - (tot == .0? .0 : res / tot);
+        pt_n[i] = end - beg;
+        n1 = i;
+    }
+
+#ifdef DEBUG_LINK_COVERAGE
+    for (i = 0; i <= max_n; ++i)
+        fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] rd_cnts: %lu %ld\n", __func__, i, rd_cnts[i]);
+    for (i = 2; i < max_n; ++i)
+        fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] rd_regs: %lu %u %.6f %.6f %.6f\n", __func__, i-2, pt_n[i], beta[i], bse[i], r2[i]);
+#endif
+
+    if (verbose > 0) {
+        for (i = 2; i < n1; ++i)
+            fprintf(stderr, "[M::%s] G: %lu N: %u D: %ld coeff: %.6f bse: %.6f R2: %.6f\n", __func__, i-2, pt_n[i], rd_cnts[i], beta[i], bse[i], r2[i]);
+    }
+
+    if (n1 > 0) {
+        // copy results
+        if (_beta) {
+            MYMALLOC(*_beta, n1 - 1);
+            memcpy(*_beta, &beta[2], n1 - 1);
+        }
+        if (_bse) {
+            MYMALLOC(*_bse, n1 - 1);
+            memcpy(*_bse, &bse[2], n1 - 1);
+        }
+        if (_r2) {
+            MYMALLOC(*_r2, n1 - 1);
+            memcpy(*_r2, &r2[2], n1 - 1);
+        }
+    }
+
+    syncmer_vec_destroy(scm, n_scm);
+    kh_scm_destroy(a_cov);
+    kh_kcn_destroy(k_cn);
+    kv_destroy(pt1);
+    free(scm_id);
+    free(rl_cnts);
+    free(rd_cnts);
+    free(beta);
+    free(bse);
+    free(r2);
+    free(pt_n);
+
+    return n1 > 0? (n1 - 1) : 0;
 }
 

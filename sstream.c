@@ -53,11 +53,18 @@ static kseq_stream_t *make_kseq_stream(char *file)
     return stream;
 }
 
+static void kstream_close(kseq_stream_t *ks)
+{
+    kseq_destroy(ks->ks);
+    gzclose(ks->fp);
+    kclose(ks->ko);
+    free(ks);
+}
+
 void sstream_close(sstream_t *ss)
 {
-    kseq_destroy(ss->s->ks);
-    gzclose(ss->s->fp);
-    kclose(ss->s->ko);
+    kstream_close(ss->s);
+    free(ss);
 }
 
 sstream_t *sstream_open(char **files, int n_files)
@@ -81,7 +88,7 @@ int sstream_read(sstream_t *ss)
         return l;
     }
     if (ss->n < ss->n_files - 1) {
-        sstream_close(ss);
+        kstream_close(ss->s);
         ++ss->n;
         ss->s = make_kseq_stream(ss->files[ss->n]);
 

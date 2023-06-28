@@ -36,8 +36,9 @@
 
 extern double realtime0;
 
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define MAX(a,b) (((a)>(b))?(a):(b))
+#define MIN(a, b) (((a)<(b))?(a):(b))
+#define MAX(a, b) (((a)>(b))?(a):(b))
+#define SWAP(a, b) do { __typeof__(a) __tmp = (a); (a) = (b); (b) = __tmp; } while (0)
 
 #ifndef kroundup32
 #define kroundup32(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, ++(x))
@@ -57,6 +58,15 @@ extern double realtime0;
     MYREALLOC((a), (m)); \
 } while (0)
 
+#define array_reverse(a, n) do { \
+    if ((n) > 0) { \
+        size_t __i, __j; \
+        __typeof__((a)[0]) __tmp; \
+        for (__i = 0, __j = (n) - 1; __i < __j; ++__i, --__j) { \
+            __tmp = (a)[__i]; (a)[__i] = (a)[__j]; (a)[__j] = __tmp; \
+        } \
+    } \
+} while (0)
 
 #ifdef __cplusplus
 extern "C" {

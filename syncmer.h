@@ -33,15 +33,16 @@
 #include <stdlib.h>
 #include <stdint.h>
 
+#include "kstring.h"
 #include "sstream.h"
 
-extern unsigned char seq_nt4_table[256];
-extern char char_nt4_table[4];
+extern const unsigned char seq_nt4_table[256];
+extern const char char_nt4_table[4];
 
 #define uint128_t __uint128_t
-#define MAX_RD_NUM 0x7FFFFFFFFFULL
-#define MAX_RD_LEN 0xFFFFFFULL
-#define MAX_RD_SCM 0xFFFFFFULL
+#define MAX_RD_NUM 0xFFFFFFFFULL
+#define MAX_RD_LEN 0x7FFFFFFFULL
+#define MAX_RD_SCM 0x7FFFFFFFULL
 
 typedef struct {
     uint64_t sid; // seq id
@@ -72,7 +73,7 @@ typedef struct {size_t n, m; sr_t *a;} sr_v;
 typedef struct {
     uint128_t h; // kmer hash
     uint64_t s; // smer << 1 | o/c
-    // s/kmer positions: sid:39 | pos:24 | rev:1 [hoco space]
+    // s/kmer positions: sid:32 | pos:31 | rev:1 [hoco space]
     // pos is the syncmer index on reads
     // refer to sr_t m_pos for the real physical position
     uint64_t *m_pos;
@@ -94,10 +95,16 @@ typedef struct {
 extern "C" {
 #endif
 
-void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, int n_threads);
+void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, size_t m_data, int n_threads);
+syncmer_t *collect_syncmer_from_reads(sr_v *sr, uint64_t *n);
+int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_seq, uint32_t min_pt,
+        double min_f, double **_beta, double **_bse, double **_r2, int verbose);
 void print_syncmer_on_seq(sr_t *sr, uint32_t n, int k, int w, FILE *fo);
 void print_all_syncmers_on_seq(sr_t *sr, int k, int w, FILE *fo);
+void print_aligned_syncmers_on_seq(sr_t *sr, int w, uint32_t beg, uint32_t end, FILE *fo);
 void print_hoco_seq(sr_t *sr, FILE *fo);
+void get_hoco_seq(sr_t *sr, kstring_t *s);
+void get_kmer_seq(uint8_t *hoco_s, uint32_t pos, int l, uint32_t rev, uint8_t *kmer_s);
 void sr_stat(sr_v *sr, sr_stat_t *stats, int w, FILE *fo, int more);
 void sr_destroy(sr_t *sr);
 void sr_v_destroy(sr_v *sr_v);

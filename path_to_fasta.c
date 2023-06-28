@@ -51,9 +51,9 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "p:s:o:Vv:h";
+    const char *opt_str = "p:s:l:n:o:Vv:h";
     ketopt_t opt = KETOPT_INIT;
-    int c, force_linear, ret = 0;
+    int c, force_linear, line_width, gap_size, ret = 0;
     asg_t *g;
     FILE *fp_help, *out_seqs;
     char *out, *seq_id, *path_file, *path_str;
@@ -63,11 +63,15 @@ int main(int argc, char *argv[])
     fp_help = stderr;
     out_seqs = stdout;
     force_linear = 0;
+    line_width = 60;
+    gap_size = 100;
     out = seq_id = path_file = path_str = 0;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 's') seq_id = opt.arg;
         else if (c == 'p') path_file = opt.arg;
+        else if (c == 'l') line_width = atoi(opt.arg);
+        else if (c == 'n') gap_size = atoi(opt.arg);
         else if (c == 301) force_linear = 1;
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
@@ -95,6 +99,8 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -p STR        two-column path file\n");
         fprintf(fp_help, "    -s STR        output sequence id\n");
+        fprintf(fp_help, "    -l INT        number of residues per line; 0 for 2^31-1 [%d]\n", line_width);
+        fprintf(fp_help, "    -n INT        number of 'N' put between sequences with no links [%d]\n", gap_size);
         fprintf(fp_help, "    -o FILE       output results to FILE [stdout]\n");
         fprintf(fp_help, "    -v INT        verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --linear      force linear output\n");
@@ -120,6 +126,8 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
+
+    if (line_width == 0) line_width = INT_MAX;
 
     if (out) {
         out_seqs = fopen(out, "w");
@@ -184,7 +192,7 @@ int main(int argc, char *argv[])
 
     size_t i;
     for (i = 0; i < paths.n; ++i)
-        print_seq(g, &paths.a[i], out_seqs? out_seqs : stdout, i, force_linear, 60);
+        print_seq(g, &paths.a[i], out_seqs? out_seqs : stdout, i, force_linear, line_width, gap_size);
     
     for (i = 0; i < paths.n; ++i)
         path_destroy(&paths.a[i]);

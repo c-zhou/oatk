@@ -69,7 +69,7 @@ The major output files in this example include: `oatk.mito.fasta` and `oatk.mito
 
 ### Use oatk wrapper
 
-There above three steps can be alternatively run with the `oatk` wrapper as,
+The above three steps can be alternatively run with the `oatk` wrapper as,
 
     oatk -k 1001 -c 150 -t 8 --nhmmscan /usr/bin/nhmmscan -m $hmm_db_dir/angiosperm_mito.fam -p $hmm_db_dir/angiosperm_pltd.fam -o oatk $input_hifi
 

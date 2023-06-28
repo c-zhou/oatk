@@ -82,6 +82,17 @@ int main() {
 		(v).a[(v).n++] = (x);										\
 	} while (0)
 
+#define kv_pushn(type, v, x, l) do {                                \
+        if ((v).n + (l) > (v).m) {                                  \
+            (v).m = (v).n + (l);                                    \
+            (v).m = (v).m? (v).m : 1;                               \
+            kv_roundup32((v).m);                                    \
+            (v).a = (type*)realloc((v).a, sizeof(type) * (v).m);    \
+        }                                                           \
+        memcpy((v).a + (v).n, (x), sizeof(type) * (l));             \
+        (v).n += (l);                                               \
+    } while (0)
+
 #define kv_pushp(type, v, p) do { \
 		if ((v).n == (v).m) { \
 			(v).m = (v).m? (v).m<<1 : 2; \

@@ -53,13 +53,20 @@ static kh_inline khint_t kh_hash_uint128(uint128_t key)
 
 KHASHL_MAP_INIT(KH_LOCAL, kh_128_t, kh_128, uint128_t, uint64_t, kh_hash_uint128, kh_eq_generic)
 
-void scg_ra_v_destroy(scg_ra_v *ra_v)
+static void scg_ra_v_clean(scg_ra_v *ra_v)
 {
     if (!ra_v) return;
     size_t i;
     for (i = 0; i < ra_v->n; ++i)
         free(ra_v->a[i].a);
     kv_destroy(*ra_v);
+}
+
+void scg_ra_v_destroy(scg_ra_v *ra_v)
+{
+    if (!ra_v) return;
+    scg_ra_v_clean(ra_v);
+    free(ra_v);
 }
 
 typedef struct { size_t n, m; uint32_t *a; } u32_v;
@@ -467,6 +474,8 @@ static void *scg_ra_analysis_thread(void *args)
 
 void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int for_unzip)
 {
+    if (sr->n == 0 || !asmg_vtx_n1(g->utg_asmg)) return;
+
     int i;
     uint64_t j, b;
 
@@ -530,7 +539,7 @@ void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int f
         pthread_join(threads[i], NULL);
 
     // clean old results in ra_v
-    scg_ra_v_destroy(ra_v);
+    scg_ra_v_clean(ra_v);
     // collect results
     ra_v->m = 0;
     for (i = 0; i < n_threads; ++i)
@@ -541,6 +550,7 @@ void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int f
         // copy data
         memcpy(ra_v->a + ra_v->n, dat[i].ra_v->a, sizeof(scg_ra_t) * dat[i].ra_v->n);
         ra_v->n += dat[i].ra_v->n;
+        free(dat[i].ra_v->a);
         free(dat[i].ra_v);
     }
 
