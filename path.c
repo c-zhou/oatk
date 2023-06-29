@@ -1053,14 +1053,15 @@ void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths)
     exceed_limit = 0;
     leaves = graph_path_extension(g, root, seg_dups, &n_leaf, &exceed_limit);
     // for linear paths do extension from the other direction of root node
+    // no - should do this even if the path is circular
     // n_leaf will be zero if path number exceeds limit
     for (i = 0; i < n_leaf; ++i) {
         node = leaves[i];
-        circ = asmg_arc1(g, node->v, s << 1) != 0;
-        if (circ) {
-            kv_push(llnodep, leaf_node, node);
-            continue;
-        }
+        // circ = asmg_arc1(g, node->v, s << 1) != 0;
+        // if (circ) {
+        //     kv_push(llnodep, leaf_node, node);
+        //     continue;
+        // }
         
         // make a new path tracing back from leaf to root
         root = new_node(node->v^1);
