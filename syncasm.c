@@ -563,10 +563,12 @@ static double quantile(double *a, int n, double q, int sorted)
         fprintf(stderr, "[E::%s] numeric error", __func__);
         exit(EXIT_FAILURE);
     }
+    if (n == 1) return a[0];
     if (!sorted) qsort(a, n, sizeof(double), dbl_cmpfunc);
     double fractpart, intpart;
     fractpart = modf(q * (n - 1), &intpart);
     int i = lround(intpart);
+    if (i == n - 1) return a[i];
     return a[i] + (a[i + 1] - a[i]) * fractpart;
 }
 

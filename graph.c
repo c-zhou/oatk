@@ -690,7 +690,7 @@ asmg_t *asmg_unitigging(asmg_t *g)
     asmg_vtx_t *vtx, *vtx1;
     uint8_t *vtx_visited;
     asmg_t *utg_asmg;
-    kvec_t(asmg_vtx_t) utgs = {0, 0 ,0};
+    kvec_t(asmg_vtx_t) utgs = {0, 0, 0};
     kvec_t(asmg_arc_t) arcs = {0, 0, 0};
     vtx = g->vtx;
     n_vtx = g->n_vtx;
