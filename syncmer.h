@@ -37,6 +37,7 @@
 #include "sstream.h"
 
 extern const unsigned char seq_nt4_table[256];
+extern const char seq_nt4_comp_table[128];
 extern const char char_nt4_table[4];
 
 #define uint128_t __uint128_t

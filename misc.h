@@ -32,6 +32,7 @@
 #define __MISC_UTILITY_H__
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 #include <stdio.h>
 
 extern double realtime0;

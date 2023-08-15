@@ -58,6 +58,8 @@ typedef struct {
     // of size n_scm + 1
     // idx_u[n_scm] - idx_u[0] is the size of scm_u
     uint128_t **idx_u;
+    // a clone will reuse scm array and h_scm map
+    bool clone;
 } scg_t;
 
 // read alignment to syncmer graph
@@ -91,6 +93,7 @@ extern "C" {
 
 void scg_destroy(scg_t *g);
 scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, double min_a_cov_f);
+scg_t *scg_clone(scg_t *scg);
 uint64_t scg_get_scm_id(scg_t *g, uint128_t key);
 void scg_arc_coverage(scg_t *scg, sr_v *sr);
 void process_mergeable_unitigs(scg_t *g);

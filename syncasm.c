@@ -65,6 +65,19 @@ KHASHL_MAP_INIT(KH_LOCAL, kh_u64_t, kh_u64, uint64_t, uint64_t, kh_hash_uint64, 
 KHASHL_MAP_INIT(KH_LOCAL, kh_u128_t, kh_u128, uint128_t, uint64_t, kh_hash_uint128, kh_eq_generic)
 KHASHL_SET_INIT(KH_LOCAL, ks_u128_t, ks_u128, uint128_t, kh_hash_uint128, kh_eq_generic)
 
+scg_t *scg_clone(scg_t *g)
+{
+    if (!g) return 0;
+    scg_t *g1;
+    MYCALLOC(g1, 1);
+    g1->n_scm = g->n_scm;
+    g1->m_scm = g->m_scm;
+    g1->scm = g->scm;
+    g1->h_scm = g->h_scm;
+    g1->clone = true;
+    return g1;
+}
+
 static void scg_destroy_scm(scg_t *g)
 {
     if (!g) return;
@@ -80,8 +93,8 @@ static void scg_destroy_scm(scg_t *g)
 void scg_destroy(scg_t *g)
 {
     if (!g) return;
-    scg_destroy_scm(g);
-    if (g->h_scm) kh_u128_destroy((kh_u128_t *) g->h_scm);
+    if (!g->clone) scg_destroy_scm(g);
+    if (g->h_scm && !g->clone) kh_u128_destroy((kh_u128_t *) g->h_scm);
     if (g->utg_asmg) asmg_destroy(g->utg_asmg);
     if (g->scm_u) free(g->scm_u);
     if (g->idx_u) free(g->idx_u);
@@ -221,21 +234,35 @@ static inline void add_a_cov(kh_u128_t *h, uint128_t v_p, uint64_t c)
     return;
 }
 
+static kh_u128_t *build_scm_hash_table(syncmer_t *scm, uint64_t n) {
+    // build syncmer hash h128 to id map
+    uint64_t i;
+    int absent;
+    khint_t k;
+    kh_u128_t *h_scm;
+    h_scm = kh_u128_init();
+    for (i = 0; i < n; ++i) {
+        k = kh_u128_put(h_scm, scm[i].h, &absent);
+        kh_val(h_scm, k) = i;
+    }
+    return h_scm;
+}
+
 scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, double min_a_cov_f)
 {
     scg_t *scg;
     MYCALLOC(scg, 1);
-    
+
     scg->scm = collect_syncmer_from_reads(sr, &scg->n_scm);
     scg->m_scm = scg->n_scm;
     if (scg->n_scm == 0) {
         scg_destroy(scg);
         return 0;
     }
+    scg->h_scm = build_scm_hash_table(scg->scm, scg->n_scm);
 
     size_t i, j;
     sr_t *s;
-
     // add utg vtx
     // each single scm is a utg
     asmg_vtx_t *vtx, *vtx1;
@@ -253,17 +280,6 @@ scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, double min_a_cov_f)
     // sort syncmer m_pos
     for (i = 0; i < scg->n_scm; ++i)
         qsort(scg->scm[i].m_pos, scg->scm[i].k_cov, sizeof(uint64_t), uint64_cmpfunc);
-
-    // build syncmer hash h128 to id map
-    int absent;
-    khint_t k;
-    kh_u128_t *h_scm;
-    h_scm = kh_u128_init();
-    for (i = 0; i < scg->n_scm; ++i) {
-        k = kh_u128_put(h_scm, scg->scm[i].h, &absent);
-        kh_val(h_scm, k) = i;
-    }
-    scg->h_scm = h_scm;
 
     // add arcs
     kvec_t(asmg_arc_t) arc;
@@ -292,6 +308,7 @@ scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, double min_a_cov_f)
         }
     }
 
+    khint_t k;
     for (k = (khint_t) 0; k < kh_end(a_cov); ++k) {
         if (kh_exist(a_cov, k)) {
             v_p = kh_key(a_cov, k);
@@ -693,10 +710,13 @@ void scg_consensus(sr_v *sr, scg_t *scg, int w, int hoco_seq, int save_seq, FILE
         if (fo) fprintf(fo, "S\tu%lu\t%.*s\tLN:i:%ld\tKC:i:%ld\tSC:f:%.3f\n", i, (int) l, c_seq.s, l, (int64_t) (l*cov), cov);
 
 #ifdef DEBUG_UTG_COVERAGE
-        fprintf(stderr, "[DEBUG_UTG_COVERAGE::%s] u%lu [N=%lu]:", __func__, i, s->n);
         uint64_t j;
+        fprintf(stderr, "[DEBUG_UTG_COVERAGE::%s] u%lu [N=%lu]:", __func__, i, s->n);
+        for (j = 0; j < s->n; ++j) fprintf(stderr, " s%lu%c", s->a[j]>>1, "+-"[s->a[j]&1]);
+        fputc('\n', stderr);
+        fprintf(stderr, "[DEBUG_UTG_COVERAGE::%s] u%lu [N=%lu]:", __func__, i, s->n);
         for (j = 0; j < s->n; ++j) fprintf(stderr, " %u", scg->scm[s->a[j]>>1].k_cov);
-        fprintf(stderr, "\n");
+        fputc('\n', stderr);
 #endif
     }
 

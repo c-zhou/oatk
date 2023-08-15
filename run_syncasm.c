@@ -72,6 +72,7 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
     MYCALLOC(sr, 1);
     sr_read(sr_rdr, sr, s, k, m_data, n_threads);
     fprintf(stderr, "[M::%s] collected syncmers from %lu target sequence(s)\n", __func__, sr_rdr->n_seq);
+    sstream_close(sr_rdr);
     if (sr_validate(sr)) {
         ret = 1;
         goto do_clean;
@@ -86,7 +87,6 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
         fprintf(stderr, "[M::%s] set minimum kmer coverage as %d\n", __func__, min_k_cov);
     }
     free(stats);
-    sstream_close(sr_rdr);
 
 #ifdef DEBUG_SYNCMER_SEQ
     uint32_t i;
