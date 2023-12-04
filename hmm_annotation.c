@@ -119,9 +119,11 @@ static void annot_worker_for(void *_data, long i, int tid) // kt_for() callback
     }
     
     wexit_st = WEXITSTATUS(exit_code);
-    if (wexit_st)
+    if (wexit_st) {
         fprintf(stderr, "[E::%s] command with non-zero exit code: %d\n", __func__, wexit_st);
-    
+        exit(EXIT_FAILURE);
+    }
+
     return;
 }
 
@@ -337,6 +339,7 @@ int VERBOSE = 0;
 static ko_longopt_t long_options[] = {
     { "nhmmscan", ko_required_argument, 301 },
     { "threads",  ko_required_argument, 't' },
+    { "verbose",  ko_required_argument, 'v' },
     { "version",  ko_no_argument,       'V' },
     { "help",     ko_no_argument,       'h' },
     { 0, 0, 0 }
@@ -390,6 +393,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
+        fprintf(fp_help, "\n");
         fprintf(fp_help, "Usage: hmm_annotation [options] <hmmdb> <query>[.gfa|.fa|.fq][.gz] [...]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -b INT           batch size [%d]\n", batch_size);
@@ -399,7 +403,8 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    --nhmmscan STR   nhmmscan executable path [%s]\n", nhmmscan);
         fprintf(fp_help, "    -v INT           verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --version        show version number\n");
-        fprintf(fp_help, "Example: ./hmm_annotation -t 8 --nhmmscan /usr/bin/nhmmscan -o asm_annot.mito.txt angiosperm_mito.fam asm.gfa\n");
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Example: ./hmm_annotation -t 8 --nhmmscan /usr/bin/nhmmscan -o asm_annot.mito.txt angiosperm_mito.fam asm.gfa\n\n");
         return fp_help == stdout? 0 : 1;
     }
 
@@ -408,6 +413,10 @@ int main(int argc, char *argv[])
         return 1;
     } else {
         nhmmdb = argv[opt.ind];
+        if (!is_file(nhmmdb)) {
+            fprintf(stderr, "[E::%s] input database file does not exist: %s\n", __func__, nhmmdb);
+            exit(EXIT_FAILURE);
+        }
     }
 
     if (argc - opt.ind < 2) {

@@ -82,56 +82,74 @@ static lv_u32_t parse_subgraph(asg_t *asg)
     return lv_list;
 }
 
-static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components,
-        int max_copy, int min_ex_g, uint32_t max_d_len, double seq_cf, int do_clean, double min_cf,
-        int bubble_size, int tip_size, double weak_cross, char *out_pref, int out_opt, uint8_t og_type, int VERBOSE)
+FILE *fopen1(char *fn)
+{
+    FILE *fo;
+    fo = fopen(fn, "w");
+    if (!fo) {
+        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, fn);
+        exit(EXIT_FAILURE);
+    }
+    return fo;
+}
+
+static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components,
+        int min_s_len, int max_copy, int min_ex_g, double seq_cf, int do_clean, double min_cf, double max_eval,
+        int bubble_size, int tip_size, double weak_cross, char *out_pref, int out_opt, OG_TYPE_t og_type, int VERBOSE)
 {
     assert(og_type == OG_MITO || og_type == OG_PLTD || og_type == OG_MINI);
 
-    FILE *out_stats, *out_seq, *out_utg, *out_gfa;
-    char *m_str;
-    MYMALLOC(m_str, strlen(out_pref) + 64);
-    sprintf(m_str, "%s.%s.stats", out_pref, OG_TYPES[og_type]);
-    out_stats = fopen(m_str, "w");
-    if (!out_stats) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    sprintf(m_str, "%s.%s.fasta", out_pref, OG_TYPES[og_type]);
-    out_seq = fopen(m_str, "w");
-    if (!out_seq) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    sprintf(m_str, "%s.%s.unassembled.fasta", out_pref, OG_TYPES[og_type]);
-    out_utg = fopen(m_str, "w");
-    if (!out_utg) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    sprintf(m_str, "%s.%s.gfa", out_pref, OG_TYPES[og_type]);
-    out_gfa = fopen(m_str, "w");
-    if (!out_gfa) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    free(m_str);
+    char *fn_str;
+    MYMALLOC(fn_str, strlen(out_pref) + 64);
+    //sprintf(fn_str, "%s.%s.stats", out_pref, OG_TYPES[og_type]);
+    //FILE *out_stats = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.ctg.fasta", out_pref, OG_TYPES[og_type]);
+    FILE *out_ctg = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.ctg.bed", out_pref, OG_TYPES[og_type]);
+    FILE *out_ctg_bed = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.gfa", out_pref, OG_TYPES[og_type]);
+    FILE *out_gfa = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.bed", out_pref, OG_TYPES[og_type]);
+    FILE *out_gfa_bed = fopen1(fn_str);
+    free(fn_str);
 
     uint32_t i, j, v, opt_circ;
     int c, ex_g, absent;
     uint64_t n_seg;
+    double opt_coverage, g_diff;
     og_component_t *component;
     kh_s32_t *h_genes;
     khint32_t k;
     kvec_t(uint32_t) sub_v;
     asmg_t *o_asmg;
-    
+    hmm_annot_bed6_db_t *bed_annots;
+
     o_asmg = asg->asmg; // original copy of asmg
     n_seg = asg->n_seg;
     h_genes = kh_s32_init();
     kv_init(sub_v);
     c = 0;
     opt_circ = 0;
+    opt_coverage = 0.;
+    g_diff = og_type == OG_MITO? 0.8 : 0.9; // relaxation for gene socres
+    bed_annots = hmm_annot_bed6_db_init();
+
+    // build gene table
+    for (i = 0; i < og_components->n; ++i) {
+        component = &og_components->a[i];
+        if (component->type != og_type)
+            continue;
+        for (j = 0; j < component->ng; ++j) {
+            if ((component->g[j]>>32 & 0x3) != (uint32_t) og_type)
+                continue;
+            k = kh_s32_get(h_genes, component->g[j]>>32);
+            if (k == kh_end(h_genes) || kh_val(h_genes, k) < (uint32_t) component->g[j]) {
+                k = kh_s32_put(h_genes, component->g[j]>>32, &absent);
+                kh_val(h_genes, k) = (uint32_t) component->g[j];
+            }
+        }
+    }
+
     for (i = 0; i < og_components->n; ++i) {
         component = &og_components->a[i];
         if (component->type != og_type)
@@ -142,13 +160,14 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                     __func__, asg->seg[component->v[0]].name, OG_TYPES[component->type], 
                     component->score, component->sscore, component->len, component->nv, component->ng);
         
-        // find number of extra genes would be added
+        // find number of genes included in the subgraph
         ex_g = 0;
         for (j = 0; j < component->ng; ++j) {
-            if ((component->g[j]>>32 & 0x3) != og_type)
+            if ((component->g[j]>>32 & 0x3) != (uint32_t) og_type)
                 continue;
             k = kh_s32_get(h_genes, component->g[j]>>32);
-            if (k == kh_end(h_genes) || kh_val(h_genes, k) < (uint32_t) component->g[j])
+            if (k == kh_end(h_genes) || // gene not presented - for safety only - not possible
+                    kh_val(h_genes, k) * g_diff <= (uint32_t) component->g[j]) // gene score is good enough
                 ++ex_g;
         }
         
@@ -162,10 +181,10 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
 
         // processing the subgraph
         // make a copy of the orginal asmg
-        asg->asmg = asg_make_asmg_copy(o_asmg, 0);
+        // asg->asmg = asg_make_asmg_copy(o_asmg, 0);
+        asg->asmg = component->asmg;
         // make subgraph
-        uint32_t *vlist = asmg_subgraph(asg->asmg, component->v, 1, 0, 0, 0, 1);
-        free(vlist);
+        // asmg_subgraph(asg->asmg, component->v, 1, 0, 0, 0, 1);
 
         if (VERBOSE > 1) {
             if (VERBOSE > 2) {
@@ -177,50 +196,62 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
         }
 
         if (do_clean) {
-            asmg_drop_tip(asg->asmg, 10, tip_size, 0, VERBOSE);
-            if (VERBOSE > 1) {
-                if (VERBOSE > 2) {
-                    fprintf(stderr, "[M::%s] subgraph tip-dropped\n", __func__);
-                    asg_print(asg, stderr, 1);
-                }
-                fprintf(stderr, "[M::%s] tip-dropped subgraph stats\n", __func__);
-                asg_stat(asg, stderr);
+            // do basic cleanup
+            uint64_t cleaned = 1;
+            while (cleaned) {
+                cleaned = 0;
+                cleaned += asmg_pop_bubble(asg->asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
+                cleaned += asmg_remove_weak_crosslink(asg->asmg, weak_cross, 10, 0, VERBOSE);
+                cleaned += asmg_drop_tip(asg->asmg, INT_MAX, tip_size, 1, 0, VERBOSE);
             }
-
-            asmg_pop_bubble(asg->asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
+            
             if (VERBOSE > 1) {
                 if (VERBOSE > 2) {
-                    fprintf(stderr, "[M::%s] subgraph bubble-popped\n", __func__);
+                    fprintf(stderr, "[M::%s] subgraph after basic clean\n", __func__);
                     asg_print(asg, stderr, 1);
                 }
-                fprintf(stderr, "[M::%s] bubble-popped subgraph stats\n", __func__);
-                asg_stat(asg, stderr);
-            }
-
-            asmg_remove_weak_crosslink(asg->asmg, weak_cross, 0, VERBOSE);
-            if (VERBOSE > 1) {
-                if (VERBOSE > 2) {
-                    fprintf(stderr, "[M::%s] subgraph weak cross-link removed\n", __func__);
-                    asg_print(asg, stderr, 1);
-                }
-                fprintf(stderr, "[M::%s] weak cross-link removed subgraph stats\n", __func__);
+                fprintf(stderr, "[M::%s] subgraph stats after basic clean\n", __func__);
                 asg_stat(asg, stderr);
             }
             // TODO filter low coverage arcs
         }
         
-        if (asmg_vtx_n1(asg->asmg) == 0)
+        if (asmg_vtx_n1(asg->asmg) == 0) {
+            asg->asmg = o_asmg; // roll back to the original copy
             continue;
+        }
         
-        int *copy_number;
-        MYMALLOC(copy_number, n_seg);
-        estimate_sequence_copy_number_from_coverage(asg, copy_number, min_cf, 1, max_copy);
+        uint32_t clen = asg_seg_len(asg);
+
+        int *copy_number = 0;
+        double avg_coverage;
+        avg_coverage = graph_sequence_coverage_precise(asg, min_cf, 1, max_copy, &copy_number);
+        if (VERBOSE > 0)
+            fprintf(stderr, "[M::%s] estimated per-copy sequence coverage: %.3f\n", __func__, avg_coverage);
+
+        if (og_type == OG_MITO && avg_coverage < opt_coverage * min_cf) {
+            // the sequence coverage of this subgraph is too low
+            // clean and roll back
+            free(copy_number);
+            asg->asmg = o_asmg; // roll back to the original copy
+            continue;
+        }
+        if (opt_coverage == 0.) opt_coverage = avg_coverage;
+
         // make a copy of the graph
         asg_t *asg_copy = asg_make_copy(asg);
         kh_u32_t *seg_dups = sequence_duplication_by_copy_number(asg_copy, copy_number, 0);
+        if (VERBOSE > 1) {
+            if (VERBOSE > 2) {
+                fprintf(stderr, "[M::%s] subgraph after making seg copies\n", __func__);
+                asg_print(asg_copy, stderr, 1);
+            }
+            fprintf(stderr, "[M::%s] seg copies included subgraph stats\n", __func__);
+            asg_stat(asg_copy, stderr);
+        }
         path_v paths;
         kv_init(paths);
-        graph_path_finder(asg_copy, seg_dups, &paths);
+        graph_path_finder(asg_copy, seg_dups, &paths, seq_cf, og_type == OG_PLTD);
         kh_u32_destroy(seg_dups);
         asg_destroy(asg_copy);
 
@@ -231,35 +262,49 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                 fprintf(stderr, "[M::%s] subgraph seeding from %s is unresolvable, output unitigs as unassembled\n",
                         __func__, asg->seg[component->v[0]].name);
             // FIXME sequences removed by graph clean are not included
-            asg_print_fa(asg, out_utg, 60);
-            kv_push(uint32_t, sub_v, component->v[0]);
+            // asg_print_fa(asg, out_ctg, 60);            
+            for (j = 0; j < component->nv; ++j) {
+                v = component->v[j];
+                if (asg->asmg->vtx[v].del) continue;
+                // write sequence
+                v <<= 1;
+                path_t path = {0, 1, 0, 1, &v, asg->seg[v>>1].len,
+                    (double) asg->seg[v>>1].len * asg->seg[v>>1].cov, 0};
+                print_seq(asg, &path, out_ctg, ++c, 0, 60, 100);
+                path_add_hmm_annot_bed6(bed_annots, annot_db, asg, &path, c, 0, 100, og_type, max_eval);
+            }
+            kv_push(uint32_t, sub_v, i);
         } else {
             uint32_t b, is_circ;
             kvec_t(uint32_t) v_pb;
             double f;
             if (og_type == OG_PLTD) // only for pltd
                 for (j = 0; j < paths.n; ++j)
-                    path_rotate(asg, &paths.a[j], annot_v, 2);
+                    path_rotate(asg, &paths.a[j], annot_db, 2);
             path_sort(&paths);
             // TODO improve the selection criteria
             kv_init(v_pb);
             b = select_best_seq(asg, &paths, 0, out_opt, seq_cf, 0, og_type == OG_PLTD);
-            f = sequence_covered_by_path(asg, &paths.a[b], component->len);
+            f = sequence_covered_by_path(asg, &paths.a[b], clen);
             is_circ = paths.a[b].circ;
             kv_push(uint32_t, v_pb, b);
             if (VERBOSE > 0)
                 fprintf(stderr, "[M::%s] best path after first pass: type, %s; coverage, %.3f\n", 
                         __func__, is_circ? "circular" : "linear", f);
-            if (!is_circ || f < seq_cf) {
+            if (!is_circ || f < 1.0) {
                 // adjust the sequence copy number and redo path finding
-                int updated = adjust_sequence_copy_number_by_graph_layout(asg, copy_number, max_copy);
+                asg_copy = asg_make_copy(asg);
+                double adjusted_avg_coverage;
+                int updated = adjust_sequence_copy_number_by_graph_layout(asg_copy, avg_coverage, &adjusted_avg_coverage, copy_number, max_copy, 10);
                 if (updated) {
+                    if (VERBOSE > 0)
+                        fprintf(stderr, "[M::%s] adjusted per-copy sequence coverage: %.3f\n", __func__, adjusted_avg_coverage);
                     // make another copy of the graph
-                    asg_t *asg_copy1 = asg_make_copy(asg);
+                    asg_t *asg_copy1 = asg_make_copy(asg_copy);
                     // do path finding
                     // allow deletion of segs here if the adjusted copy number is zero
                     kh_u32_t *seg_dups1 = sequence_duplication_by_copy_number(asg_copy1, copy_number, 1);
-                    
+
                     // subgraph may be divided into multiple subgraphs
                     path_v paths1;
                     uint32_t b1, is_circ1;
@@ -289,15 +334,23 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
 
                         path_v tmp_paths1 = {0, 0, 0};
                         asg_copy1->asmg = g1;
-                        graph_path_finder(asg_copy1, seg_dups1, &tmp_paths1);
+                        if (VERBOSE > 1) {
+                            if (VERBOSE > 2) {
+                                fprintf(stderr, "[M::%s] subgraph after making seg copies\n", __func__);
+                                asg_print(asg_copy1, stderr, 1);
+                            }
+                            fprintf(stderr, "[M::%s] seg copies included subgraph stats\n", __func__);
+                            asg_stat(asg_copy1, stderr);
+                        }
+                        graph_path_finder(asg_copy1, seg_dups1, &tmp_paths1, seq_cf, og_type == OG_PLTD);
 
                         if (og_type == OG_PLTD) // only for pltd
                             for (j = 0; j < tmp_paths1.n; ++j)
-                                path_rotate(asg_copy1, &tmp_paths1.a[j], annot_v, 2);
+                                path_rotate(asg_copy1, &tmp_paths1.a[j], annot_db, 2);
                         path_sort(&tmp_paths1);
                         // TODO improve the selection criteria
                         b1 = select_best_seq(asg_copy1, &tmp_paths1, 0, out_opt, seq_cf, 0, og_type == OG_PLTD);    
-                        f1 += sequence_covered_by_path(asg_copy1, &tmp_paths1.a[b1], component->len);
+                        f1 += sequence_covered_by_path(asg_copy1, &tmp_paths1.a[b1], clen);
                         is_circ1 &= tmp_paths1.a[b1].circ;
                         // add all paths
                         kv_push(uint32_t, v_pb1, b1 + paths1.n);
@@ -313,8 +366,15 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                     kh_u32_destroy(seg_dups1);
                     asg_destroy(asg_copy1);
 
+                    if (VERBOSE > 0) fprintf(stderr, "[M::%s] best path in second pass: type, %s; coverage, %.3f\n",
+                            __func__, is_circ1? "circular" : "linear", f1);
+
                     // compare new path to old to make final choice
-                    if ((is_circ1 && f1 >= seq_cf) || ((is_circ1 || !is_circ) && f1 > f)) {
+                    // TODO improve comparison criteria
+                    // if ((is_circ1 && f1 >= seq_cf) || ((is_circ1 || !is_circ) && f1 > f)) {
+                    if ((is_circ1 == is_circ && f1 > f) || // second pass covered more sequences 
+                            (is_circ1 > is_circ && f1 >= f * seq_cf) || // second pass is circle and covered at least seq_cf of first pass
+                            (is_circ1 < is_circ && f1 * seq_cf >= f)) { // second pass is not circle but covered significantly more sequence
                         // choose the new one
                         f = f1;
                         is_circ = is_circ1;
@@ -333,28 +393,43 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
                                 __func__, is_circ? "circular" : "linear", f);
 
                 }
+                asg_destroy(asg_copy);
             }
 
-            if (is_circ || !opt_circ || component->len > max_d_len) {
+            if (is_circ || !opt_circ || clen >= min_s_len) {
                 if (!opt_circ) opt_circ = is_circ;
                 
-                kv_push(uint32_t, sub_v, component->v[0]);
+                kv_push(uint32_t, sub_v, i);
 
-                // update gene table
-                for (j = 0; j < component->ng; ++j) {
-                    if ((component->g[j]>>32 & 0x3) != og_type)
-                        continue;
-                    k = kh_s32_get(h_genes, component->g[j]>>32);
-                    if (k == kh_end(h_genes) || kh_val(h_genes, k) < (uint32_t) component->g[j]) {
-                        k = kh_s32_put(h_genes, component->g[j]>>32, &absent);
-                        kh_val(h_genes, k) = (uint32_t) component->g[j];
-                    }
+                // path_stats(asg, &paths, out_stats);
+                int *incl;
+                MYCALLOC(incl, n_seg);
+                for (j = 0; j < component->nv; ++j) {
+                    v = component->v[j];
+                    if (!asg->asmg->vtx[v].del)
+                        incl[v] = 1;
+                }
+                for (j = 0; j < v_pb.n; ++j) {
+                    path_t *path = &paths.a[v_pb.a[j]];
+                    print_seq(asg, path, out_ctg, ++c, 0, 60, 100);
+                    path_add_hmm_annot_bed6(bed_annots, annot_db, asg, path, c, 0, 100, og_type, max_eval);
+                    for (v = 0; v < path->nv; ++v)
+                        incl[path->v[v]>>1] = 0;
                 }
                 
-                path_stats(asg, &paths, out_stats);
-                for (j = 0; j < v_pb.n; ++j)
-                    print_seq(asg, &paths.a[v_pb.a[j]], out_seq, ++c, 0, 60, 100);
-                
+                // revisit to write sequences not included in the paths
+                for (j = 0; j < component->nv; ++j) {
+                    v = component->v[j];
+                    if (!incl[v] || asg->seg[v].len < min_s_len) continue;
+                    // write sequence
+                    v <<= 1;
+                    path_t path = {0, 1, 0, 1, &v, asg->seg[v>>1].len, 
+                        (double) asg->seg[v>>1].len * asg->seg[v>>1].cov, 0};
+                    print_seq(asg, &path, out_ctg, ++c, 0, 60, 100);
+                    path_add_hmm_annot_bed6(bed_annots, annot_db, asg, &path, c, 0, 100, og_type, max_eval);
+                }
+                free(incl);
+
                 if (VERBOSE > 0)
                     fprintf(stderr, "[M::%s] processing subgraph seeding from %s DONE, %d better genes gained\n",
                             __func__, asg->seg[component->v[0]].name, ex_g);
@@ -367,15 +442,45 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
 
         free(copy_number);
 
-        asmg_destroy(asg->asmg);
         asg->asmg = o_asmg; // roll back to the original copy
     }
+    
+    hmm_annot_print_bed6(bed_annots, out_ctg_bed, 1);
 
     // extract and output organelle gfa components
     if (sub_v.n > 0) {
         // in subgraph all vtx and arcs deleted during expansion are back
-        asg->asmg = asg_make_asmg_copy(o_asmg, 0);
-        uint32_t *vlist = asmg_subgraph(asg->asmg, sub_v.a, sub_v.n, 0, 0, 0, 1);
+        uint32_t cov, del;
+        asmg_t *g, *g1;
+        g = asg_make_asmg_copy(og_components->a[sub_v.a[0]].asmg, 0);
+        for (i = 1; i < sub_v.n; ++i) {
+            g1 = og_components->a[sub_v.a[i]].asmg;
+            // merge g1 to g
+            for (j = 0; j < g->n_vtx; ++j) {
+                cov = 0;
+                del = 1;
+                if (!g->vtx[j].del)  del = 0, cov += g->vtx[j].cov;
+                if (!g1->vtx[j].del) del = 0, cov += g1->vtx[j].cov;
+                if (del) continue;
+                if (cov > o_asmg->vtx[j].cov) cov = o_asmg->vtx[j].cov;
+                g->vtx[j].del = del;
+                g->vtx[j].cov = cov;
+            }
+            for (j = 0; j < g->n_arc; ++j) {
+                cov = 0;
+                del = 1;
+                if (!g->arc[j].del)  del = 0, cov += g->arc[j].cov;
+                if (!g1->arc[j].del) del = 0, cov += g1->arc[j].cov;
+                if (del) continue;
+                if (cov > o_asmg->arc[j].cov) cov = o_asmg->arc[j].cov;
+                g->arc[j].del = del;
+                g->arc[j].cov = cov;
+            }
+        }
+        asg->asmg = g;
+        uint64_t nv = 0;
+        char **vlist = asg_vtx_name_list(asg, &nv);
+        hmm_annot_formatted_print_sname_list(annot_db, vlist, nv, out_gfa_bed, og_type, max_eval, 1);
         free(vlist);
         asg_print(asg, out_gfa, 0);
         asmg_destroy(asg->asmg);
@@ -383,11 +488,13 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_v *annot_v, og_compo
     }
     kv_destroy(sub_v);
     kh_s32_destroy(h_genes);
+    hmm_annot_bed6_db_destroy(bed_annots);
 
-    fclose(out_stats);
-    fclose(out_seq);
-    fclose(out_utg);
+    //fclose(out_stats);
+    fclose(out_ctg);
+    fclose(out_ctg_bed);
     fclose(out_gfa);
+    fclose(out_gfa_bed);
 }
 
 typedef struct {
@@ -563,7 +670,7 @@ static int extract_minicircles_with_anchor(scg_ra_v *ra, scg_t *scg, uint64_t an
         len = g->vtx[vt[0]>>1].len;
         cov = g->vtx[vt[0]>>1].cov;
         wlen = (double) cov * len;
-        len -= a->lo, wlen -= cov * a->lo; // circular path
+        len -= a->ls, wlen -= cov * a->ls; // circular path
         
         for (j = 1; j < nv; ++j) {
             len1 = g->vtx[vt[j]>>1].len;
@@ -572,8 +679,8 @@ static int extract_minicircles_with_anchor(scg_ra_v *ra, scg_t *scg, uint64_t an
             wlen += (double) cov * len1;
             a = asmg_arc1(g, vt[j-1], vt[j]);
             assert(!!a);
-            len -= a->lo;
-            wlen -= (double) cov * a->lo;
+            len -= a->ls;
+            wlen -= (double) cov * a->ls;
         }
 
         path->len = len;
@@ -583,8 +690,9 @@ static int extract_minicircles_with_anchor(scg_ra_v *ra, scg_t *scg, uint64_t an
     return paths->n;
 }
 
-static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components,
-        double *seg_annot_score, scg_meta_t *scg_meta, int n_threads, char *out_pref, int out_opt, double seq_cf, int VERBOSE)
+static int parse_organelle_minicircle(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components,
+        double *seg_annot_score, scg_meta_t *scg_meta, int n_threads, char *out_pref, int out_opt, 
+        double max_eval, double seq_cf, int VERBOSE)
 {
     if (og_components->n == 0) {
         if (VERBOSE > 0)
@@ -592,44 +700,30 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
         return 1;
     }
 
-    FILE *out_stats, *out_seq, *out_utg, *out_gfa;
-    char *m_str;
-    MYMALLOC(m_str, strlen(out_pref) + 64);
-    sprintf(m_str, "%s.%s.stats", out_pref, OG_TYPES[OG_MINI]);
-    out_stats = fopen(m_str, "w");
-    if (!out_stats) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    sprintf(m_str, "%s.%s.fasta", out_pref, OG_TYPES[OG_MINI]);
-    out_seq = fopen(m_str, "w");
-    if (!out_seq) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    sprintf(m_str, "%s.%s.unassembled.fasta", out_pref, OG_TYPES[OG_MINI]);
-    out_utg = fopen(m_str, "w");
-    if (!out_utg) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    sprintf(m_str, "%s.%s.gfa", out_pref, OG_TYPES[OG_MINI]);
-    out_gfa = fopen(m_str, "w");
-    if (!out_gfa) {
-        fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, m_str);
-        exit(EXIT_FAILURE);
-    }
-    free(m_str);
+    char *fn_str;
+    MYMALLOC(fn_str, strlen(out_pref) + 64);
+    //sprintf(fn_str, "%s.%s.stats", out_pref, OG_TYPES[OG_MINI]);
+    //FILE *out_stats = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.ctg.fasta", out_pref, OG_TYPES[OG_MINI]);
+    FILE *out_ctg = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.ctg.bed", out_pref, OG_TYPES[OG_MINI]);
+    FILE *out_ctg_bed = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.gfa", out_pref, OG_TYPES[OG_MINI]);
+    FILE *out_gfa = fopen1(fn_str);
+    sprintf(fn_str, "%s.%s.bed", out_pref, OG_TYPES[OG_MINI]);
+    FILE *out_gfa_bed = fopen1(fn_str);
+    free(fn_str);
 
     uint32_t i, anchor_sid;
     uint64_t n_seg;
     double max_s;
     og_component_t *component;
     asmg_t *asmg;
+    hmm_annot_bed6_db_t *bed_annots;
 
     n_seg = asg->n_seg;
     asmg = scg_meta->scg->utg_asmg;
-
+    
     // find the anchor sequence in the first og component
     component = &og_components->a[0];
     if (component->type != OG_MINI)
@@ -676,21 +770,21 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
     if (path_exists) {
         // align reads and find minicircles
         asmg_clean_consensus(scg_meta->scg->utg_asmg);
-        scg_read_alignment(scg_meta->sr, scg_meta->ra, scg_meta->scg, n_threads, 0);
+        scg_read_alignment(scg_meta->sr_db, scg_meta->ra_db, scg_meta->scg, n_threads, 0);
 
 #ifdef DEBUG_MINICIRCLE_REPEAT_UNIT
-        scg_rv_print(scg_meta->ra, stderr);
+        scg_rv_print(scg_meta->ra_db, stderr);
 #endif
 
-        scg_consensus(scg_meta->sr, scg_meta->scg, scg_meta->k, 0, 0, 0);
-        extract_minicircles_with_anchor(scg_meta->ra, scg_meta->scg, anchor_sid, n_threads, &paths);
+        scg_consensus(scg_meta->sr_db, scg_meta->scg, 0, 0, 0);
+        extract_minicircles_with_anchor(scg_meta->ra_db, scg_meta->scg, anchor_sid, n_threads, &paths);
     }
 
     // prepare assembly subgraph for output
     asmg_t *o_asmg = asg->asmg;
     asg->asmg = asg_make_asmg_copy(o_asmg, 0);
-    uint32_t *vlist = asmg_subgraph(asg->asmg, &anchor_sid, 1, 0, 0, 0, 1);
-    free(vlist);
+    asmg_subgraph(asg->asmg, &anchor_sid, 1, 0, 0, 0, 1);
+    bed_annots = hmm_annot_bed6_db_init();
 
     if (paths.n == 0) {
         // not possible to solve the graph
@@ -699,54 +793,66 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_v *annot_v, og_compo
             fprintf(stderr, "[M::%s] subgraph seeding from %s is unresolvable, output unitigs as unassembled\n",
                     __func__, asg->seg[anchor_sid].name);
         // FIXME sequences removed by graph clean are not included
-        asg_print_fa(asg, out_utg, 60);
+        asg_print_fa(asg, stdout, 60);
+        uint32_t c, v;
+        c = 0;
+        for (i = 0; i < component->nv; ++i) {
+            v = component->v[i];
+            if (asg->asmg->vtx[v].del) continue;
+            // write sequence
+            v <<= 1;
+            path_t path = {0, 1, 0, 1, &v, asg->seg[v>>1].len,
+                (double) asg->seg[v>>1].len * asg->seg[v>>1].cov, 0};
+            print_seq(asg, &path, out_ctg, ++c, 0, 60, 100);
+            path_add_hmm_annot_bed6(bed_annots, annot_db, asg, &path, c, 0, 100, OG_MINI, max_eval);
+        }
     } else {
         uint32_t b;
         path_sort(&paths);
         // TODO improve the selection criteria
         b = select_best_seq(asg, &paths, 0, out_opt, seq_cf, 0, 0);
-        path_stats(asg, &paths, out_stats);
-        print_seq(asg, &paths.a[b], out_seq, 1, 0, 60, 100);
+        // path_stats(asg, &paths, out_stats);
+        print_seq(asg, &paths.a[b], out_ctg, 1, 0, 60, 100);
+        path_add_hmm_annot_bed6(bed_annots, annot_db, asg, &paths.a[b], 1, 0, 100, OG_MINI, max_eval);
     }
+    
+    hmm_annot_print_bed6(bed_annots, out_ctg_bed, 1);
 
+    uint64_t nv = 0;
+    char **vlist = asg_vtx_name_list(asg, &nv);
+    hmm_annot_formatted_print_sname_list(annot_db, vlist, nv, out_gfa_bed, OG_MINI, max_eval, 1);
+    free(vlist);
     asg_print(asg, out_gfa, 0);
     asmg_destroy(asg->asmg);
     asg->asmg = o_asmg; // roll back to the original copy
 
     path_v_destroy(&paths);
+    hmm_annot_bed6_db_destroy(bed_annots);
 
-    fclose(out_stats);
-    fclose(out_seq);
-    fclose(out_utg);
+    //fclose(out_stats);
+    fclose(out_ctg);
+    fclose(out_ctg_bed);
     fclose(out_gfa);
+    fclose(out_gfa_bed);
 
     return 0;
 }
 
-int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int n_core, int min_len,
-        int min_ex_g, int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
-        int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
+int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len,
+        int min_ex_g, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+        int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int n_threads, int VERBOSE)
 {
     asg_t *asg;
-    hmm_annot_v *annot_v;
+    hmm_annot_db_t *annot_db;
     og_component_v *og_components;
     double *seg_annot_score;
     int ret = 0;
 
     asg = 0;
-    annot_v = 0;
+    annot_db = 0;
     og_components = 0;
     seg_annot_score = 0;
-
-    annot_v = hmm_annot_read(mini_annot, annot_v, OG_MINI);
-    if (annot_v == 0) {
-        fprintf(stderr, "[E::%s] failed to read the annotation file\n", __func__);
-        ret = 1;
-        goto do_clean;
-    }
-    if (annot_v) hmm_annot_index(annot_v);
-    if (VERBOSE > 2) hmm_annot_print(annot_v->a, annot_v->n, stderr);
 
     asg = asg_read(asg_file);
     if (asg == 0) {
@@ -755,43 +861,48 @@ int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta
         goto do_clean;
     }
 
-    og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, &seg_annot_score, VERBOSE);
+    annot_db = hmm_annot_read(mini_annot, annot_db, OG_MINI);
+    if (annot_db == 0) {
+        fprintf(stderr, "[E::%s] failed to read the annotation file\n", __func__);
+        ret = 1;
+        goto do_clean;
+    }
+
+    if (VERBOSE > 2) hmm_annot_db_print(annot_db, stderr);
+
+    seg_annot_score = get_sequence_annot_score(annot_db, asg, no_trn, no_rrn, max_eval, 0, VERBOSE);
+    og_components = annot_subgraph_og_type(annot_db, asg, no_trn, no_rrn, max_eval, 0, min_len, min_score, 1, VERBOSE);
     if (!og_components) {
         fprintf(stderr, "[E::%s] no organelle component found\n", __func__);
         ret = 1;
         goto do_clean;
     }
-    if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
+    if (VERBOSE > 1) print_og_classification_summary(asg, annot_db, og_components, stderr);
 
-    parse_organelle_minicircle(asg, annot_v, og_components, seg_annot_score, scg_meta, n_threads, out_pref, out_opt, seq_cf, VERBOSE);
+    parse_organelle_minicircle(asg, annot_db, og_components, seg_annot_score, scg_meta, n_threads, out_pref, out_opt, max_eval, seq_cf, VERBOSE);
 
 do_clean:
     asg_destroy(asg);
-    hmm_annot_v_destroy(annot_v);
+    hmm_annot_db_destroy(annot_db);
     og_component_v_destroy(og_components);
     free(seg_annot_score);
 
     return ret;
 }
 
-int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, int min_len, int min_ex_g,
-        int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
-        int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
+int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, int ext_p, int ext_m,
+        int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+        int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int VERBOSE)
 {
     asg_t *asg;
-    hmm_annot_v *annot_v;
+    hmm_annot_db_t *annot_db;
     og_component_v *og_components;
     int ret = 0;
 
     asg = 0;
-    annot_v = 0;
+    annot_db = 0;
     og_components = 0;
-
-    if (mito_annot) annot_v = hmm_annot_read(mito_annot, annot_v, OG_MITO);
-    if (pltd_annot) annot_v = hmm_annot_read(pltd_annot, annot_v, OG_PLTD);
-    if (annot_v) hmm_annot_index(annot_v);
-    if (VERBOSE > 2) hmm_annot_print(annot_v->a, annot_v->n, stderr);
 
     asg = asg_read(asg_file);
     if (asg == 0) {
@@ -799,7 +910,7 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, i
         ret = 1;
         goto do_clean;
     }
-
+    
     if (VERBOSE > 1) {
         if (VERBOSE > 2) {
             fprintf(stderr, "[M::%s] graph loaded\n", __func__);
@@ -809,28 +920,34 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, i
         asg_stat(asg, stderr);
     }
 
-    if (do_graph_clean && min_cf > .0) clean_graph_by_sequence_coverage(asg, min_cf, max_copy, VERBOSE);
+    if (mito_annot) annot_db = hmm_annot_read(mito_annot, annot_db, OG_MITO);
+    if (pltd_annot) annot_db = hmm_annot_read(pltd_annot, annot_db, OG_PLTD);
+    
+    if (VERBOSE > 2) hmm_annot_db_print(annot_db, stderr);
 
-    og_components = annot_seq_og_type(annot_v, asg, no_trn, max_eval, n_core, min_len, min_score, 0, VERBOSE);
+    // this is not necessary
+    // if (do_graph_clean && min_cf > .0) clean_graph_by_sequence_coverage(asg, min_cf, max_copy, VERBOSE);
+    og_components = asg_annotation(annot_db, asg, no_trn, no_rrn, max_eval, 0, min_len, min_score, 1, VERBOSE);
+    // og_components = annot_subgraph_og_type(annot_db, asg, no_trn, no_rrn, max_eval, 0, min_len, min_score, 1, VERBOSE);
     if (!og_components) {
         fprintf(stderr, "[E::%s] no organelle component found\n", __func__);
         ret = 1;
         goto do_clean;
     }
 
-    if (VERBOSE > 1) print_og_classification_summary(asg, annot_v, og_components, stderr);
+    if (VERBOSE > 1) print_og_classification_summary(asg, annot_db, og_components, stderr);
 
     // graph will be changed with extra copies of sequences added
     if (mito_annot)
-        parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-                do_graph_clean, min_cf, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
+        parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, ext_m, seq_cf, do_graph_clean, 
+                min_cf, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
     if (pltd_annot)
-        parse_organelle_component(asg, annot_v, og_components, max_copy, min_ex_g, max_d_len, seq_cf,
-                do_graph_clean, min_cf, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
+        parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, ext_p, seq_cf, do_graph_clean, 
+                min_cf, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
 
 do_clean:
     asg_destroy(asg);
-    hmm_annot_v_destroy(annot_v);
+    hmm_annot_db_destroy(annot_db);
     og_component_v_destroy(og_components);
 
     return ret;
@@ -849,20 +966,20 @@ static ko_longopt_t long_options[] = {
     { "kmer-c-tag",     ko_required_argument, 305 },
     { "seq-c-tag",      ko_required_argument, 306 },
     { "include-trn",    ko_no_argument,       307 },
-    { "max-eval",       ko_required_argument, 308 },
-    { "min-s-length",   ko_required_argument, 309 },
-    { "max-d-length",   ko_required_argument, 310 },
-    { "no-graph-clean", ko_no_argument,       311 },
-    { "max-bubble",     ko_required_argument, 312 },
-    { "max-tip",        ko_required_argument, 313 },
-    { "weak-cross",     ko_required_argument, 314 },
+    { "include-rrn",    ko_no_argument,       308 },
+    { "max-bubble",     ko_required_argument, 307 },
+    { "max-tip",        ko_required_argument, 310 },
+    { "weak-cross",     ko_required_argument, 311 },
+    { "no-graph-clean", ko_no_argument,       312 },
     { "mito-annot",     ko_required_argument, 'm' },
     { "pltd-annot",     ko_required_argument, 'p' },
-    { "core-gene",      ko_required_argument, 'g' },
     { "min-score",      ko_required_argument, 's' },
-    { "min-gain",       ko_required_argument, 'a' },
+    { "min-gain",       ko_required_argument, 'g' },
     { "min-s-cov",      ko_required_argument, 'q' },
     { "max-copy",       ko_required_argument, 'c' },
+    { "max-eval",       ko_required_argument, 'e' },
+    { "min-s-len",      ko_required_argument, 'l' },
+    { "verbose",        ko_required_argument, 'v' },
     { "version",        ko_no_argument,       'V' },
     { "help",           ko_no_argument,       'h' },
     { 0, 0, 0 }
@@ -870,12 +987,12 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "a:m:p:f:g:q:s:c:o:Vv:h";
+    const char *opt_str = "c:e:f:g:hl:m:o:p:q:s:v:V";
     ketopt_t opt = KETOPT_INIT;
     int c, out_s, out_c, max_copy, ret = 0;
     FILE *fp_help;
     char *out_pref, *mito_annot, *pltd_annot, *ec_tag, *kc_tag, *sc_tag;
-    int no_trn, n_core, min_len, min_ex_g, max_d_len, bubble_size, tip_size, do_graph_clean;
+    int no_trn, no_rrn, min_len, ext_p, ext_m, bubble_size, tip_size, do_graph_clean;
     double max_eval, min_score, min_cf, seq_cf, weak_cross;
 
     sys_init();
@@ -891,28 +1008,33 @@ int main(int argc, char *argv[])
     kc_tag = 0;
     sc_tag = 0;
     no_trn = 1;
+    no_rrn = 1;
     do_graph_clean = 1;
     bubble_size = 100000;
     tip_size = 10000;
     weak_cross = 0.3;
-    n_core = 0;
-    max_eval = 1e-12;
+    max_eval = 1e-6;
     min_len = 10000;
     min_score = 100;
-    min_ex_g = 3;
-    max_d_len = 50000;
-    seq_cf = .95;
+    ext_p = 3;
+    ext_m = 1;
+    seq_cf = .90;
     min_cf = .20;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 'm') mito_annot = opt.arg;
         else if (c == 'p') pltd_annot = opt.arg;
         else if (c == 'f') seq_cf = atof(opt.arg);
-        else if (c == 'g') n_core = atoi(opt.arg);
         else if (c == 's') min_score = atof(opt.arg);
         else if (c == 'c') max_copy = atoi(opt.arg);
-        else if (c == 'a') min_ex_g = atoi(opt.arg);
+        else if (c == 'g') {
+            char *p;
+            ext_p = strtol(opt.arg, &p, 10);
+            if (*p == ',') ext_m = strtol(p + 1, &p, 10);
+        }
         else if (c == 'q') min_cf = atof(opt.arg);
+        else if (c == 'e') max_eval = atof(opt.arg);
+        else if (c == 'l') min_len = atoi(opt.arg);
         else if (c == 'o') out_pref = opt.arg;
         else if (c == 301) out_s = 0, ++out_c;
         else if (c == 302) out_s = 1, ++out_c;
@@ -921,13 +1043,11 @@ int main(int argc, char *argv[])
         else if (c == 305) kc_tag = opt.arg;
         else if (c == 306) sc_tag = opt.arg;
         else if (c == 307) no_trn = 0;
-        else if (c == 308) max_eval = atof(opt.arg);
-        else if (c == 309) min_len = atoi(opt.arg);
-        else if (c == 310) max_d_len = atoi(opt.arg);
-        else if (c == 311) do_graph_clean = 0;
-        else if (c == 312) bubble_size = atoi(opt.arg);
-        else if (c == 313) tip_size = atoi(opt.arg);
-        else if (c == 314) weak_cross = atof(opt.arg);
+        else if (c == 308) no_rrn = 1;
+        else if (c == 309) bubble_size = atoi(opt.arg);
+        else if (c == 310) tip_size = atoi(opt.arg);
+        else if (c == 311) weak_cross = atof(opt.arg);
+        else if (c == 312) do_graph_clean = 0;
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -945,6 +1065,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
+        fprintf(fp_help, "\n");
         fprintf(fp_help, "Usage: pathfinder [options] <file>[.gfa[.gz]]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "  Input/Output:\n");
@@ -952,30 +1073,30 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -p FILE              plastid core gene annotation file [NULL]\n");
         fprintf(fp_help, "    -o FILE              prefix of output files [%s]\n", out_pref);
         fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.2f]\n", seq_cf);
-        fprintf(fp_help, "    --longest            output only the longest path [default]\n");
-        fprintf(fp_help, "    --circular           output only the longest circular path\n");
-        fprintf(fp_help, "    --all                output all best paths\n");
+        //fprintf(fp_help, "    --longest            output only the longest path [default]\n");
+        //fprintf(fp_help, "    --circular           output only the longest circular path\n");
+        //fprintf(fp_help, "    --all                output all best paths\n");
         fprintf(fp_help, "    --edge-c-tag STR     edge coverage tag in the GFA file [EC:i] \n");
         fprintf(fp_help, "    --kmer-c-tag STR     kmer coverage tag in the GFA file [KC:i] \n");
-        fprintf(fp_help, "    --seq-c-tag STR      sequence coverage tag in the GFA file [SC:f]\n");
+        fprintf(fp_help, "    --seq-c-tag  STR     sequence coverage tag in the GFA file [SC:f]\n");
         fprintf(fp_help, "    -v INT               verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --version            show version number\n");
         fprintf(fp_help, "  Classification:\n");
-        fprintf(fp_help, "    -g INT               number of top core gene annotations to consider [%d]\n", n_core);
-        fprintf(fp_help, "    -s FLOAT             minimum annotation score of a subgraph [%.1f]\n", min_score);
-        fprintf(fp_help, "    -a INT               minimum number of addtional core genes to include a sequence [%d]\n", min_ex_g);
-        fprintf(fp_help, "    --include-trn        include TRN type genes\n");
-        fprintf(fp_help, "    --max-eval  FLOAT    maximum E-value of a core gene [%.3e]\n", max_eval);
-        fprintf(fp_help, "    --min-s-length INT   minimum length of a singleton sequence to keep [%d]\n", min_len);
-        fprintf(fp_help, "    --max-d-length INT   maximum length of a singleton sequence to delete [%d]\n", max_d_len);
+        fprintf(fp_help, "    -s FLOAT             minimum total annotation score of a subgraph [%.1f]\n", min_score);
+        fprintf(fp_help, "    -g INT[,INT]         minimum number of core gene gain; the second INT for mitochondria [%d,%d]\n", ext_p, ext_m);
+        fprintf(fp_help, "    -e FLOAT             maximum E-value of a core gene [%.3e]\n", max_eval);
+        fprintf(fp_help, "    -l INT               minimum length of a singleton sequence to keep [%d]\n", min_len);
+        fprintf(fp_help, "    --include-trn        include tRNA genes for sequence classification\n");
+        fprintf(fp_help, "    --include-rrn        include rRNA genes for sequence classification\n");
         fprintf(fp_help, "  Path-finding:\n");
-        fprintf(fp_help, "    -c INT               maximum copy number to consider [%d]\n", max_copy);
         fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
-        fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
+        fprintf(fp_help, "    -c INT               maximum copy number to consider [%d]\n", max_copy);
         fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
         fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);
         fprintf(fp_help, "    --weak-cross FLOAT   maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
-        fprintf(fp_help, "Example: ./pathfinder -m asm_annot.mito.txt -p asm_annot.pltd.txt -o oatk.asm asm.gfa\n");
+        fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Example: ./pathfinder -m asm_annot.mito.txt -p asm_annot.pltd.txt -o oatk.asm asm.gfa\n\n");
         return fp_help == stdout? 0 : 1;
     }
 
@@ -1018,8 +1139,8 @@ int main(int argc, char *argv[])
 
     if (out_s < 0) out_s = 0;
     
-    ret = pathfinder(argv[opt.ind], mito_annot, pltd_annot, n_core, min_len, min_ex_g, max_d_len, max_copy, 
-            max_eval, min_score, min_cf, seq_cf, no_trn, do_graph_clean, bubble_size, tip_size, weak_cross,
+    ret = pathfinder(argv[opt.ind], mito_annot, pltd_annot, min_len, ext_p, ext_m, max_copy, 
+            max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, tip_size, weak_cross,
             out_s, out_pref, VERBOSE);
     
     if (ret) {

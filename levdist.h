@@ -24,19 +24,93 @@
 
 /********************************** Revision History *****************************
  *                                                                               *
- * 13/03/23 - Chenxi Zhou: Created                                               *
+ * 24/07/23 - Chenxi Zhou: Created                                               *
  *                                                                               *
  *********************************************************************************/
+#ifndef LEV_DIST_H
+#define LEV_DIST_H
 
-#ifndef __OATK_VERSION_H__
-#define __OATK_VERSION_H__
+#include <stdlib.h>
+#include <stdint.h>
 
-#define SYNCASM_VERSION "1.0"
-#define HMMANNOTATION_VERSION "1.0"
-#define PATHFINDER_VERSION "1.0"
-#define PATHTOFASTA_VERSION "1.0"
-#define OATK_VERSION "1.0"
-
+#ifndef kroundup32
+#define kroundup32(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, ++(x))
 #endif
 
+/*
+ * Diagonal and a couple of common routines
+ */
+typedef struct {
+    int32_t d, k, p; // diagonal (query pos minus target pos), target pos, traceback variable
+} wf_diag1_t;
+
+typedef struct {
+    size_t n, m;
+    wf_diag1_t *a;
+} wf_diag_t;
+
+/*
+ * Traceback arrays
+ */
+typedef struct {
+    int32_t n, d0;
+    uint64_t *a;
+} wf_tb1_t;
+
+typedef struct {
+    size_t m, n;
+    wf_tb1_t *a;
+} wf_tb_t;
+
+/*
+ * CIGAR operations
+ */
+typedef struct {
+    int32_t m, n;
+    uint32_t *cigar;
+} wf_cigar_t;
+
+typedef struct {
+    char *ts, *qs;
+    int32_t tl, ql;
+    wf_diag_t *wf_diag;
+    wf_tb_t *wf_tb;
+    int32_t is_ext, bw;
+    int32_t score, t_end, q_end, n_cigar;
+    uint32_t *cigar;
+} wf_config_t;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/**
+ * Find the edit distance between two sequences
+ *
+ * @param tl         target sequence length
+ * @param ts         target sequence
+ * @param ql         query sequence length
+ * @param qs         query sequence
+ * @param is_ext     extension alignment if true (stop when reaching the end of either query or target)
+ * @param bw         bandwidth
+ * @param step       step size; only when n_cigar is not NULL
+ * @param score      (out) edit distance
+ * @param t_endl     (out) length of target in the alignment
+ * @param q_endl     (out) length of query in the alignment
+ * @param n_cigar    (in/out) number of cigar operations; NULL if don't need CIGAR
+ *
+ * @return CIGAR in the htslib packing
+ */
+uint32_t *wf_ed(int32_t tl, const char *ts, int32_t ql, const char *qs, int32_t is_ext, int32_t bw, int32_t *score, 
+        int32_t *t_endl, int32_t *q_endl, int32_t *n_cigar);
+void wf_ed_core(wf_config_t *conf);
+void wf_print_cigar(uint32_t *cigar, int32_t n_cigar, FILE *fo);
+void wf_print_alignment(char *ts, int tl, char *qs, int ql, uint32_t *cigar, int32_t n_cigar, int lwd, FILE *fo);
+void wf_config_destroy(wf_config_t *conf, int clean_seq);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
 

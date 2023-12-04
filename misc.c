@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/stat.h>
 
 #include "misc.h"
 
@@ -222,6 +223,33 @@ void check_executable(char *exe)
         fprintf(stderr, "[E::%s] executable %s is not available\n", __func__, exe);
         exit(EXIT_FAILURE);
     }
+}
+
+int is_file(const char *path) {
+    struct stat path_stat;
+    if (stat(path, &path_stat) == -1)
+        return 0;  // stat error
+
+    return S_ISREG(path_stat.st_mode);
+}
+
+int is_dir(const char *path) {
+    struct stat path_stat;
+    if (stat(path, &path_stat) == -1)
+        return 0;  // stat error
+
+    return S_ISDIR(path_stat.st_mode);
+}
+
+int is_fifo(const char *path) {
+    if (*path == '-')
+        return 1;
+
+    struct stat path_stat;
+    if (stat(path, &path_stat) == -1)
+        return 0;  // stat error
+
+    return S_ISFIFO(path_stat.st_mode);
 }
 
 FILE *open_outstream(char *prefix, char *suffix)

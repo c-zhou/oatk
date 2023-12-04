@@ -49,18 +49,18 @@
 int VERBOSE = 0;
 
 int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_size, int tip_size, int min_k_cov,
-        double min_a_cov_f, double weak_cross, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE);
+        double min_a_cov_f, double weak_cross, int do_ec, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE);
 
 int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE *fo, uint32_t max_batch_size, 
         uint32_t max_batch_num, int n_threads, char *tmpdir);
 
-int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int n_core, int min_len, int min_ex_g, int max_d_len,
-        int max_copy, double max_eval, double min_score, double min_cf, double seq_cf, int no_trn, int do_graph_clean, 
-        int bubble_size, int tip_size, double weak_cross, int out_opt, char *out_pref, int VERBOSE);
+int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, int ext_p, int ext_m,
+        int max_copy, double max_eval, double min_score, double min_cf, double seq_cf, int no_trn, int no_rrn,
+        int do_graph_clean, int bubble_size, int tip_size, double weak_cross, int out_opt, char *out_pref, int VERBOSE);
 
-int pathfinder_minicircle(char *asg_file, char *mito_annot, scg_meta_t *scg_meta, int n_core, int min_len,
-        int min_ex_g, int max_d_len, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
-        int no_trn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
+int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len,
+        int min_ex_g, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+        int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int n_threads, int VERBOSE);
 
 static int make_dir(char *dir)
@@ -78,28 +78,29 @@ static int make_dir(char *dir)
 }
 
 static ko_longopt_t long_options[] = {
-    { "mini-circle",    ko_no_argument,       301 },
-    { "max-bubble",     ko_required_argument, 302 },
-    { "max-tip",        ko_required_argument, 303 },
-    { "weak-cross",     ko_required_argument, 304 },
-    { "no-unzip",       ko_no_argument,       305 },
+    { "max-bubble",     ko_required_argument, 301 },
+    { "max-tip",        ko_required_argument, 302 },
+    { "weak-cross",     ko_required_argument, 303 },
+    { "unzip-round",    ko_required_argument, 304 },
+    { "no-read-ec",     ko_no_argument,       305 },
     { "nhmmscan",       ko_required_argument, 306 },
     { "longest",        ko_no_argument,       307 },
     { "circular",       ko_no_argument,       308 },
     { "all",            ko_no_argument,       309 },
-    { "core-gene",      ko_required_argument, 310 },
-    { "min-score",      ko_required_argument, 311 },
-    { "min-gain",       ko_required_argument, 312 },
-    { "max-eval",       ko_required_argument, 313 },
-    { "min-s-length",   ko_required_argument, 314 },
-    { "max-d-length",   ko_required_argument, 315 },
-    { "min-s-cov",      ko_required_argument, 316 },
-    { "max-copy",       ko_required_argument, 317 },
-    { "no-graph-clean", ko_no_argument,       318 },
-    { "include-trn",    ko_no_argument,       319 },
+    { "include-trn",    ko_no_argument,       310 },
+    { "include-rrn",    ko_no_argument,       311 },
+    { "no-graph-clean", ko_no_argument,       312 },
+    { "mini-circle",    ko_no_argument,       'M' },
     { "mito-db",        ko_required_argument, 'm' },
     { "pltd-db",        ko_required_argument, 'p' },
     { "threads",        ko_required_argument, 't' },
+    { "min-score",      ko_required_argument, 'S' },
+    { "min-gain",       ko_required_argument, 'g' },
+    { "max-eval",       ko_required_argument, 'e' },
+    { "min-s-length",   ko_required_argument, 'l' },
+    { "min-s-cov",      ko_required_argument, 'q' },
+    { "max-copy",       ko_required_argument, 'C' },
+    { "verbose",        ko_required_argument, 'v' },
     { "version",        ko_no_argument,       'V' },
     { "help",           ko_no_argument,       'h' },
     { 0, 0, 0 }
@@ -107,12 +108,13 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "k:s:c:a:D:m:p:b:T:f:o:t:Vv:h";
+    const char *opt_str = "a:b:c:C:D:e:f:g:Ghk:l:m:Mo:p:q:s:S:t:T:v:V";
     ketopt_t opt = KETOPT_INIT;
-    int k, s, bubble_size, tip_size, do_unzip, min_k_cov, batch_size;
-    int out_s, out_c, n_db, max_copy, no_trn, n_core, min_len, min_ex_g, max_d_len, do_graph_clean;
+    int k, s, bubble_size, tip_size, min_k_cov, batch_size;
+    int out_s, out_c, n_db, max_copy, min_len, ext_p, ext_m;
     int mini_circle, n_threads;
     double min_a_cov_f, weak_cross, max_eval, min_score, min_cf, seq_cf;
+    int do_ec, do_unzip, input_asg, do_graph_clean, no_trn, no_rrn;
     size_t m_data;
     FILE *fp_help;
     char *out, *nhmmscan, *mito_db, *pltd_db, *tmpdir;
@@ -123,15 +125,17 @@ int main(int argc, char *argv[])
     // public
     n_threads = 1;
     mini_circle = 0;
+    input_asg = 0;
     out = "./oatk.asm";
     fp_help = stderr;
     // syncasm parameters
     k = 1001;
     s = 31;
-    min_k_cov = 3;
+    min_k_cov = 30;
     min_a_cov_f = .35;
     m_data = 0;
-    do_unzip = 1;
+    do_ec = 1;
+    do_unzip = 3;
     bubble_size = 100000;
     tip_size = 10000;
     weak_cross = 0.3;
@@ -139,7 +143,7 @@ int main(int argc, char *argv[])
     mito_db = 0;
     pltd_db = 0;
     n_db = 0;
-    batch_size = 1000000;
+    batch_size = 100000;
     nhmmscan = "nhmmscan";
     tmpdir = 0;
     // pathfinder parameters
@@ -147,14 +151,14 @@ int main(int argc, char *argv[])
     out_c = 0;
     max_copy = 10;
     no_trn = 1;
+    no_rrn = 1;
     do_graph_clean = 1;
-    n_core = 0;
-    max_eval = 1e-12;
-    min_len = 10000;
+    max_eval = 1e-6;
+    min_len = -1;
     min_score = 100;
-    min_ex_g = 3;
-    max_d_len = 50000;
-    seq_cf = .95;
+    ext_p = 3;
+    ext_m = 1;
+    seq_cf = .90;
     min_cf = .20;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
@@ -178,26 +182,31 @@ int main(int argc, char *argv[])
             if (strcmp(opt.arg, "-") != 0)
                 out = opt.arg;
         }
+        else if (c == 'S') min_score = atof(opt.arg);
+        else if (c == 'g') {
+            char *p;
+            ext_p = strtol(opt.arg, &p, 10);
+            if (*p == ',') ext_m = strtol(p + 1, &p, 10);
+        }
+        else if (c == 'e') max_eval = atof(opt.arg);
+        else if (c == 'l') min_len = atoi(opt.arg);
+        else if (c == 'q') min_cf = atof(opt.arg);
+        else if (c == 'C') max_copy = atoi(opt.arg);
         else if (c == 't') n_threads = atoi(opt.arg);
-        else if (c == 301) mini_circle = 1;
-        else if (c == 302) bubble_size = atoi(opt.arg);
-        else if (c == 303) tip_size = atoi(opt.arg);
-        else if (c == 304) weak_cross = atof(opt.arg);
-        else if (c == 305) do_unzip = 0;
+        else if (c == 'M') mini_circle = 1;
+        else if (c == 'G') input_asg = 1;
+        else if (c == 301) bubble_size = atoi(opt.arg);
+        else if (c == 302) tip_size = atoi(opt.arg);
+        else if (c == 303) weak_cross = atof(opt.arg);
+        else if (c == 304) do_unzip = atoi(opt.arg);
+        else if (c == 305) do_ec = 0;
         else if (c == 306) nhmmscan = opt.arg;
         else if (c == 307) out_s = 0, ++out_c;
         else if (c == 308) out_s = 1, ++out_c;
         else if (c == 309) out_s = 2, ++out_c;
-        else if (c == 310) n_core = atoi(opt.arg);
-        else if (c == 311) min_score = atof(opt.arg);
-        else if (c == 312) min_ex_g = atoi(opt.arg);
-        else if (c == 313) max_eval = atof(opt.arg);
-        else if (c == 314) min_len = atoi(opt.arg);
-        else if (c == 315) max_d_len = atoi(opt.arg);
-        else if (c == 316) min_cf = atof(opt.arg);
-        else if (c == 317) max_copy = atoi(opt.arg);
-        else if (c == 318) do_graph_clean = 0;
-        else if (c == 319) no_trn = 0;
+        else if (c == 310) no_trn = 0;
+        else if (c == 311) no_rrn = 0;
+        else if (c == 312) do_graph_clean = 0;
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -215,12 +224,14 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
+        fprintf(fp_help, "\n");
         fprintf(fp_help, "Usage: oatk [options] <target.fa[stq][.gz]> [...]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "  Input/Output:\n");
         fprintf(fp_help, "    -o FILE              prefix of output files [%s]\n", out);
         fprintf(fp_help, "    -t INT               number of threads [%d]\n", n_threads);
-        fprintf(fp_help, "    --mini-circle        run mini circle mode such as animal mitochondria and plasmid\n");
+        fprintf(fp_help, "    -G                   using input FILE as assembly graph file instead of raw reads for Syncasm\n");
+        fprintf(fp_help, "    -M                   run minicircle mode for small animal mitochondria or plasmid\n");
         fprintf(fp_help, "    -v INT               verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --version            show version number\n");
         fprintf(fp_help, "  Syncasm:\n");
@@ -229,32 +240,33 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -c INT               minimum kmer coverage [%d]\n", min_k_cov);
         fprintf(fp_help, "    -a FLOAT             minimum arc coverage [%.2f]\n", min_a_cov_f);
         fprintf(fp_help, "    -D INT               maximum amount of data to use; suffix K/M/G recognized [%lu]\n", m_data);
-        fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
-        fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);
-        fprintf(fp_help, "    --weak-cross FLOAT   maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
-        fprintf(fp_help, "    --no-unzip           do not run assembly graph unzipping\n");
+        fprintf(fp_help, "    --max-bubble  INT    maximum bubble size for assembly graph clean [%d]\n", bubble_size);
+        fprintf(fp_help, "    --max-tip     INT    maximum tip size for assembly graph clean [%d]\n", tip_size);
+        fprintf(fp_help, "    --weak-cross  FLOAT  maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
+        fprintf(fp_help, "    --unzip-round INT    maximum round of assembly graph unzipping [%d]\n", do_unzip);
+        fprintf(fp_help, "    --no-read-ec         do not do read error correction\n");
         fprintf(fp_help, "  Annotation:\n");
         fprintf(fp_help, "    -m FILE              mitochondria gene annotation HMM profile database [NULL]\n");
         fprintf(fp_help, "    -p FILE              plastid gene annotation HMM profile database [NULL]\n");
         fprintf(fp_help, "    -b INT               batch size [%d]\n", batch_size);
-        fprintf(fp_help, "    -T STR               temporary directory [NULL]\n");
+        fprintf(fp_help, "    -T DIR               temporary directory [NULL]\n");
         fprintf(fp_help, "    --nhmmscan STR       nhmmscan executable path [nhmmscan]\n");
         fprintf(fp_help, "  Pathfinder:\n");
         fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.2f]\n", seq_cf);
-        fprintf(fp_help, "    --longest            output only the longest path [default]\n");
-        fprintf(fp_help, "    --circular           output only the longest circular path\n");
-        fprintf(fp_help, "    --all                output all best paths\n");
-        fprintf(fp_help, "    --core-gene INT      number of top core gene annotations to consider [%d]\n", n_core);
-        fprintf(fp_help, "    --min-score FLOAT    minimum annotation score of a subgraph [%.1f]\n", min_score);
-        fprintf(fp_help, "    --min-gain INT       minimum number of addtional core genes to include a sequence [%d]\n", min_ex_g);
-        fprintf(fp_help, "    --max-eval  FLOAT    maximum E-value of a core gene [%.3e]\n", max_eval);
-        fprintf(fp_help, "    --min-s-length INT   minimum length of a singleton sequence to keep [%d]\n", min_len);
-        fprintf(fp_help, "    --max-d-length INT   maximum length of a singleton sequence to delete [%d]\n", max_d_len);
-        fprintf(fp_help, "    --min-s-cov FLOAT    minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
-        fprintf(fp_help, "    --max-copy INT       maximum copy number to consider [%d]\n", max_copy);
+        fprintf(fp_help, "    -S FLOAT             minimum total annotation score of a subgraph [%.1f]\n", min_score);
+        fprintf(fp_help, "    -g INT[,INT]         minimum number of core gene gain; the second INT for mitochondria [%d,%d]\n", ext_p, ext_m);
+        //fprintf(fp_help, "    --longest            output only the longest path [default]\n");
+        //fprintf(fp_help, "    --circular           output only the longest circular path\n");
+        //fprintf(fp_help, "    --all                output all best paths\n");
+        fprintf(fp_help, "    -e FLOAT             maximum E-value of a core gene [%.3e]\n", max_eval);
+        fprintf(fp_help, "    -l INT               minimum length of a singleton sequence to keep [%d]\n", mini_circle? 5000 : 10000);
+        fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
+        fprintf(fp_help, "    -C INT               maximum copy number to consider [%d]\n", max_copy);
+        fprintf(fp_help, "    --include-trn        include tRNA genes for sequence classification\n");
+        fprintf(fp_help, "    --include-rrn        include rRNA genes for sequence classification\n");
         fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
-        fprintf(fp_help, "    --include-trn        include TRN type genes\n");
-        fprintf(fp_help, "Example: ./oatk -o oatk.asm -t 16 -m angiosperm_mito.fam -p angiosperm_pltd.fam hifi.fa.gz\n");
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Example: ./oatk -o oatk.asm -t 16 -m angiosperm_mito.fam -p angiosperm_pltd.fam hifi.fa.gz\n\n");
         return fp_help == stdout? 0 : 1;
     }
 
@@ -267,10 +279,24 @@ int main(int argc, char *argv[])
     if (n_db == 0) {
         fprintf(stderr, "[E::%s] provide at least one HMM profile database (-m and/or -p)\n", __func__);
         exit(EXIT_FAILURE);
+    } else {
+        if (mito_db && !is_file(mito_db)) {
+            fprintf(stderr, "[E::%s] input database file does not exist: %s\n", __func__, mito_db);
+            exit(EXIT_FAILURE);
+        }
+
+        if (pltd_db && !is_file(pltd_db)) {
+            fprintf(stderr, "[E::%s] input database file does not exist: %s\n", __func__, pltd_db);
+            exit(EXIT_FAILURE);
+        }
     }
 
     if (mini_circle) {
         fprintf(stderr, "[W::%s] mini-circle mode is still under development\n", __func__);
+        if (input_asg) {
+            fprintf(stderr, "[E::%s] mini-circle mode is not compatible with '-G' option\n", __func__);
+            exit(EXIT_FAILURE);
+        }
         // exit(EXIT_FAILURE);
     }
 
@@ -278,6 +304,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "[E::%s] only one HMM profile database (-m or -p) allowed for mini-circle mode\n", __func__);
         exit(EXIT_FAILURE);
     }
+
+    if (input_asg && is_fifo(argv[opt.ind])) {
+        fprintf(stderr, "[E::%s] STDIN input is not compatible with '-G' option\n", __func__);
+        exit(EXIT_FAILURE);
+    }
+
+    if (min_len < 0) min_len = mini_circle? 5000 : 10000;
 
     /*** parse output dirname and basename ***/
     char *outdir, *outname;
@@ -305,15 +338,21 @@ int main(int argc, char *argv[])
 
     /*** syncasm assembly ***/
     scg_meta_t *scg_meta;
-    MYCALLOC(scg_meta, 1);
-    ret = syncasm(argv + opt.ind, argc - opt.ind, m_data, k, s, bubble_size, tip_size, min_k_cov, min_a_cov_f, weak_cross, do_unzip, n_threads, outpref, scg_meta, VERBOSE);
-    if (ret) {
-        fprintf(stderr, "[E::%s] syncasm assembly program failed\n", __func__);
-        exit(EXIT_FAILURE);
-    }
     char *asg_file;
-    MYMALLOC(asg_file, outlen + 16);
-    sprintf(asg_file, "%s_utg_final.gfa", outpref);
+    MYCALLOC(scg_meta, 1);
+    if (input_asg) {
+        MYMALLOC(asg_file, strlen(argv[opt.ind]) + 1);
+        sprintf(asg_file, "%s", argv[opt.ind]);
+        fprintf(stderr, "[M::%s] using user input assembly graph file: %s\n", __func__, asg_file);
+    } else {
+        ret = syncasm(argv + opt.ind, argc - opt.ind, m_data, k, s, bubble_size, tip_size, min_k_cov, min_a_cov_f, weak_cross, do_ec, do_unzip, n_threads, outpref, scg_meta, VERBOSE);
+        if (ret) {
+            fprintf(stderr, "[E::%s] syncasm assembly program failed\n", __func__);
+            exit(EXIT_FAILURE);
+        }
+        MYMALLOC(asg_file, outlen + 16);
+        sprintf(asg_file, "%s.utg.final.gfa", outpref);
+    }
 
     /*** hmm annotation ***/
     char *mito_annot, *pltd_annot;
@@ -354,13 +393,13 @@ int main(int argc, char *argv[])
     
     /*** pathfinder ***/
     if (mini_circle) // pathfinder in mini-circle mode
-        ret = pathfinder_minicircle(asg_file, mito_db? mito_annot : pltd_annot, scg_meta, n_core, min_len, min_ex_g,
-                max_d_len, max_copy, max_eval, min_score, min_cf, seq_cf, no_trn, do_graph_clean, bubble_size, 
+        ret = pathfinder_minicircle(asg_file, mito_db? mito_annot : pltd_annot, scg_meta, min_len, ext_p, max_copy, 
+                max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, 
                 tip_size, weak_cross, out_s, outpref, n_threads, VERBOSE);
     else // pathfinder in normal mode
-        ret = pathfinder(asg_file, mito_annot, pltd_annot, n_core, min_len, min_ex_g, max_d_len, max_copy,
-                max_eval, min_score, min_cf, seq_cf, no_trn, do_graph_clean, bubble_size, tip_size, weak_cross,
-                out_s, outpref, VERBOSE);
+        ret = pathfinder(asg_file, mito_annot, pltd_annot, min_len, ext_p, ext_m, max_copy, 
+                max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, 
+                tip_size, weak_cross, out_s, outpref, VERBOSE);
 
     /*** final clean ***/
     if (rm_tmpdir) rmdir(tmpdir); // should be empty

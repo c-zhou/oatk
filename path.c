@@ -114,6 +114,17 @@ static int u64_cmpfunc(const void *a, const void *b)
     return (*(uint64_t *) a > *(uint64_t *) b) - (*(uint64_t *) a < *(uint64_t *) b);
 }
 
+uint64_t asg_seg_len(asg_t *asg)
+{
+    asmg_t *g = asg->asmg;
+    uint64_t i, seg_len = 0;
+    for (i = 0; i < g->n_vtx; ++i) {
+        if (g->vtx[i].del) continue;
+        seg_len += g->vtx[i].len;
+    }
+    return seg_len;
+}
+
 static double graph_sequence_coverage_lower_bound(asg_t *asg, double cov_nq)
 {
     uint32_t i, n_seg, len, cov;
@@ -148,9 +159,10 @@ static double graph_sequence_coverage_lower_bound(asg_t *asg, double cov_nq)
     }
     if (tot_seg_len < len_thresh)
         tot_cov += (seqcovs[i] >> 32) * (len_thresh - tot_seg_len);
-
     cov_bound = (double) tot_cov / len_thresh;
     free(seqcovs);
+
+    cov_bound *= 1 - cov_nq;
 
 #ifdef DEBUG_SEG_COV_BOUND
     fprintf(stderr, "[DEBUG_SEG_COV_BOUND::%s] estimated sequence coverage lower boundary: %.3f\n", __func__, cov_bound);
@@ -333,13 +345,15 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
         asmg_vtx_addp(g, &vt);
         MYBZERO(vt, 1);
         vt->len = seg->len;
-        vt->cov = seg->cov / copy;
+        // using vtx coverage instead of seg coverage
+        //vt->cov = seg->cov / copy;
+        vt->cov = g->vtx[s].cov / copy;
 
         // make copies of links
         // arc cov already changed
         for (j = 0; j < arcs_diff.n; ++j) {
             av = &g->arc[arcs_diff.a[j]];
-            asmg_arc_add2(g, sid << 1 | (av->v&1), av->w, av->lo, UINT64_MAX, av->cov / copy, av->comp);
+            asmg_arc_add2(g, sid << 1 | (av->v&1), av->w, av->ln, av->ls, UINT64_MAX, av->cov / copy, av->comp);
         }
         
         if (self_arc != UINT64_MAX) {
@@ -347,8 +361,8 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
             // self arcs are added between copies
             av = &g->arc[self_arc];
             for (j = 0; j < i; ++j) {
-                asmg_arc_add2(g, (sid - i + j) << 1, sid << 1, av->lo, UINT64_MAX, av->cov / copy, 0);
-                asmg_arc_add2(g, sid << 1, (sid - i + j) << 1, av->lo, UINT64_MAX, av->cov / copy, 0);
+                asmg_arc_add2(g, (sid - i + j) << 1, sid << 1, av->ln, av->ls, UINT64_MAX, av->cov / copy, 0);
+                asmg_arc_add2(g, sid << 1, (sid - i + j) << 1, av->ln, av->ls, UINT64_MAX, av->cov / copy, 0);
             }
         }
     }
@@ -366,12 +380,12 @@ static void make_seg_dups(asg_t *asg, kh_u32_t *seg_dups, uint32_t s, uint32_t c
 
 #define EM_MAX_ITER 1000
 
-double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number, double min_cf, int min_copy, int max_copy)
+double graph_sequence_coverage_precise(asg_t *asg, double min_cf, int min_copy, int max_copy, int **_copy_number)
 {
     uint32_t i, n_seg, iter;
+    int *copy_number;
     double total_covs, total_lens, avg_cov, new_avg_cov, min_avg_cov;
     asmg_t *g;
-    int null_v;
     
     n_seg = asg->n_seg;
     g = asg->asmg;
@@ -382,11 +396,10 @@ double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number,
             __func__, min_avg_cov, avg_cov);
 #endif
     avg_cov = MAX(avg_cov, min_avg_cov);
-    null_v = copy_number == 0;
-    if (null_v) MYCALLOC(copy_number, n_seg);
+    MYCALLOC(copy_number, n_seg);
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del) continue;
-        copy_number[i] = MIN(MAX(min_copy, lround((double) asg->seg[i].cov / avg_cov)), max_copy);
+        copy_number[i] = MIN(MAX(min_copy, lround((double) g->vtx[i].cov / avg_cov)), max_copy);
     }
 
     iter = 0;
@@ -397,17 +410,18 @@ double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number,
         total_covs = total_lens = 0;
         for (i = 0; i < n_seg; ++i) {
             if (g->vtx[i].del) continue;
-            total_lens += (double) asg->seg[i].len * copy_number[i];
-            total_covs += (double) asg->seg[i].len * asg->seg[i].cov;
+            total_lens += (double) g->vtx[i].len * copy_number[i];
+            total_covs += (double) g->vtx[i].len * g->vtx[i].cov;
         }
         // FIXME total_lens could be zero
-        new_avg_cov = MAX(total_covs / total_lens, min_avg_cov);
+        new_avg_cov = total_lens < FLT_EPSILON? DBL_MAX : (total_covs / total_lens);
+        new_avg_cov = MAX(new_avg_cov, min_avg_cov);
         if (fabs(new_avg_cov - avg_cov) < FLT_EPSILON) 
             break; // converged
         avg_cov = new_avg_cov;
         for (i = 0; i < n_seg; ++i) {
             if (g->vtx[i].del) continue;
-            copy_number[i] = MIN(MAX(min_copy, lround((double) asg->seg[i].cov / avg_cov)), max_copy);
+            copy_number[i] = MIN(MAX(min_copy, lround((double) g->vtx[i].cov / avg_cov)), max_copy);
         }
     }
 
@@ -416,11 +430,14 @@ double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number,
             __func__, iter, avg_cov);
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del) continue;
-        fprintf(stderr, "[DEBUG_SEG_COPY_EST::%s] %s %u %d\n", __func__, asg->seg[i].name, asg->seg[i].cov, copy_number[i]);
+        fprintf(stderr, "[DEBUG_SEG_COPY_EST::%s] %s %u %d\n", __func__, asg->seg[i].name, g->vtx[i].cov, copy_number[i]);
     }
 #endif
     
-    if(null_v) free(copy_number);
+    if (_copy_number)
+        *_copy_number = copy_number;
+    else
+        free(copy_number);
 
     return avg_cov;
 }
@@ -597,18 +614,25 @@ static void estimate_arc_copy_number_siman_impl(func_t *funcs, int n_func, var_t
 #endif
 }
 
-int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, int max_copy)
+int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, double seq_coverage, double *_adjusted_cov, int *copy_number, int max_copy, int max_round)
 {
     uint32_t i, j, n_seg, n_group, a_g, *arc_group;
     uint64_t link_id;
-    int updated;
+    int updated, round;
     asmg_t *g;
     asmg_arc_t *a;
+
+    if (_adjusted_cov)
+        *_adjusted_cov = seq_coverage;
+    if (max_round == 0)
+        max_round = 1;
+
+    updated = 0;
 
     g = asg->asmg;
     n_seg = asg->n_seg;
     arc_group = asmg_uext_arc_group(g, &n_group);
-    
+
 #ifdef DEBUG_SEG_COV_ADJUST
     fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] identified %u arc groups\n", __func__, n_group);
     for (i = 0; i < g->n_arc; ++i) {
@@ -631,8 +655,8 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] sequence copy number BEFORE adjusted by graph layout\n", __func__);
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del) continue;
-        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] %s %u %u %d\n", __func__, 
-                asg->seg[i].name, asg->seg[i].len, asg->seg[i].cov, copy_number[i]);
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] %s %lu %u %d\n", __func__, 
+                asg->seg[i].name, g->vtx[i].len, g->vtx[i].cov, copy_number[i]);
     }
 #endif
 
@@ -691,8 +715,11 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     kv_init(funcs);
     func_t *FUN;
     uint32_t k, v, na;
+    int *funcmap; // the objective function index for each seg
     asmg_arc_t *av;
+    MYMALLOC(funcmap, n_seg);
     for (i = 0; i < n_seg; ++i) {
+        funcmap[i] = -1;
         if (g->vtx[i].del)
             continue;
 #ifdef BALANCE_IN_OUT
@@ -716,9 +743,10 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
         }
         if (V.n) {
             MYREALLOC(V.a, V.n);
+            funcmap[i] = funcs.n;
             kv_pushp(func_t, funcs, &FUN);
-            FUN->weight = log10(asg->seg[i].len);
-            FUN->v_exp = copy_number[i];
+            FUN->weight = log10(g->vtx[i].len);
+            FUN->v_exp = g->vtx[i].cov / seq_coverage; // copy_number[i];
             FUN->VAR = VAR;
             FUN->N = V.n;
             FUN->V = V.a;
@@ -740,9 +768,10 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
             }
             if (V.n) {
                 MYREALLOC(V.a, V.n);
+                funcmap[i] = funcs.n;
                 kv_pushp(func_t, funcs, &FUN);
-                FUN->weight = log10(asg->seg[i].len);
-                FUN->v_exp = copy_number[i];
+                FUN->weight = log10(g->vtx[i].len);
+                FUN->v_exp = g->vtx[i].cov / seq_coverage; // copy_number[i];
                 FUN->VAR = VAR;
                 FUN->N = V.n;
                 FUN->V = V.a;
@@ -754,36 +783,112 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
 
     // do optimization
     int *arc_copy;
+    double adjusted_cov, min_avg_cov;
     int64_t sol_space_size;
+    
+    min_avg_cov = graph_sequence_coverage_lower_bound(asg, 0.3);
+    adjusted_cov = seq_coverage;
+
     MYCALLOC(arc_copy, n_group);
     sol_space_size = 1;
     for (i = 0; i < n_group && sol_space_size <= BRUTE_FORCE_N_LIM; ++i)
         sol_space_size *= (arc_copy_ub[i] - arc_copy_lb[i] + 1);
-    if (sol_space_size <= BRUTE_FORCE_N_LIM) {
-        // do brute force optimization
+    
+    round = 0;
+    while (round++ < max_round) {
 #ifdef DEBUG_SEG_COV_ADJUST
-        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] run brute force searching: %ld\n",
-                __func__, sol_space_size);
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] adjusting copy number round %d of %d\n", __func__, round, max_round);
 #endif
-        estimate_arc_copy_number_brute_force_impl(funcs.a, funcs.n, VAR, n_group, arc_copy, sol_space_size);
-    } else {
-        // do simulated annealing optimization
+        if (sol_space_size <= BRUTE_FORCE_N_LIM) {
+            // do brute force optimization
 #ifdef DEBUG_SEG_COV_ADJUST
-        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] run simulated annealing optimization: %ld\n",
-                __func__, sol_space_size);
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] run brute force searching: %ld\n",
+                    __func__, sol_space_size);
 #endif
-        estimate_arc_copy_number_siman_impl(funcs.a, funcs.n, VAR, n_group, arc_copy);
-    }
+            estimate_arc_copy_number_brute_force_impl(funcs.a, funcs.n, VAR, n_group, arc_copy, sol_space_size);
+        } else {
+            // do simulated annealing optimization
+#ifdef DEBUG_SEG_COV_ADJUST
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] run simulated annealing optimization: %ld\n",
+                    __func__, sol_space_size);
+#endif
+            estimate_arc_copy_number_siman_impl(funcs.a, funcs.n, VAR, n_group, arc_copy);
+        }
 
 #ifdef DEBUG_SEG_COV_ADJUST
-    for (i = 0; i < n_group; ++i)
-        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] arc group %u optimum copy number %d [%u %u]\n",
-                __func__, i, arc_copy[i], arc_copy_lb[i], arc_copy_ub[i]);
+        for (i = 0; i < n_group; ++i)
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] arc group %u optimum copy number %d [%u %u]\n",
+                    __func__, i, arc_copy[i], arc_copy_lb[i], arc_copy_ub[i]);
 #endif
+        // update average sequence coverage
+        double total_covs, total_lens, new_adjusted_cov, copies;
+        total_covs = total_lens = 0;
+        for (i = 0; i < n_seg; ++i) {
+            if (g->vtx[i].del)
+                continue;
+            copies = 0;
+            for (k = 0; k < 2; ++k) {
+                v = i << 1 | k;
+                na = asmg_arc_n(g, v);
+                av = asmg_arc_a(g, v);
+                for (j = 0; j < na; ++j) {
+                    if (av[j].del)
+                        continue;
+                    link_id = av[j].link_id;
+                    a_g = arc_group[link_id];
+                    assert(a_g != (uint32_t) -1);
+                    copies += arc_copy[a_g];
+                }
+            }
+            total_lens += (double) g->vtx[i].len * copies / 2;
+            total_covs += (double) g->vtx[i].len * g->vtx[i].cov;
+        }
+    
+        if (total_lens < FLT_EPSILON) {
+#ifdef DEBUG_SEG_COV_ADJUST
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] zero copies for all sequences\n", __func__);
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] adjusting copy number terminated in round %d of %d\n",
+                    __func__, round, max_round);
+#endif
+            goto do_clean;
+        }
+
+        new_adjusted_cov = total_covs / total_lens;
+        new_adjusted_cov = MAX(new_adjusted_cov, min_avg_cov);
+
+        if (fabs(new_adjusted_cov - adjusted_cov) < FLT_EPSILON) {
+#ifdef DEBUG_SEG_COV_ADJUST
+            fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] adjusting copy number converaged in round %d of %d\n",
+                    __func__, round, max_round);
+#endif
+            break; // converaged
+        }
+
+        // update adjusted sequence coverage
+        adjusted_cov = new_adjusted_cov;
+        // update objective functions
+        // more precisely the expected copy number
+        for (i = 0; i < n_seg; ++i) {
+            if (funcmap[i] == -1)
+                continue;
+            funcs.a[funcmap[i]].v_exp = g->vtx[i].cov / adjusted_cov;
+            funcs.a[funcmap[i]].VAL = 0.;
+        }
+        // reset VARs
+        for (i = 0; i < n_group; ++i) {
+            var_t *var = VAR[i];
+            while (var->B) var = var->next;
+            VAR[i] = var;
+        }
+
+#ifdef DEBUG_SEG_COV_ADJUST
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] adjusting copy number round %d of %d DONE with adjusted coverage: %.3f\n",
+                __func__, round, max_round, adjusted_cov);
+#endif
+    }
 
     // update sequence copy number using the arc copy number information
     int new_copy[2];
-    updated = 0;
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del)
             continue;
@@ -832,11 +937,15 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] sequence copy number AFTER adjusted by graph layout\n", __func__);
     for (i = 0; i < n_seg; ++i) {
         if (g->vtx[i].del) continue;
-        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] %s %u %u %d\n", __func__, 
-                asg->seg[i].name, asg->seg[i].len, asg->seg[i].cov, copy_number[i]);
+        fprintf(stderr, "[DEBUG_SEG_COV_ADJUST::%s] %s %lu %u %d\n", __func__, 
+                asg->seg[i].name, g->vtx[i].len, g->vtx[i].cov, copy_number[i]);
     }
 #endif
+    
+    if (_adjusted_cov)
+        *_adjusted_cov = adjusted_cov;
 
+do_clean:
     for (i = 0; i < n_group; ++i) {
         var_t *var0, *var1;
         var0 = VAR[i];
@@ -855,6 +964,7 @@ int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, in
     for (i = 0; i < funcs.n; ++i)
         free(funcs.a[i].V);
     free(funcs.a);
+    free(funcmap);
     free(arc_group);
     free(arc_copy_lb);
     free(arc_copy_ub);
@@ -880,15 +990,15 @@ kh_u32_t *sequence_duplication_by_copy_number(asg_t *asg, int *copy_number, int 
             // do copy
             make_seg_dups(asg, seg_dups, i, copy);
 #ifdef DEBUG_SEG_COPY
-            fprintf(stderr, "[DEBUG_SEG_COPY::%s] make %d extra cop%s of %s [%u %u]\n", __func__, 
-                    copy, copy > 1? "ies" : "y", asg->seg[i].name, asg->seg[i].len, asg->seg[i].cov);
+            fprintf(stderr, "[DEBUG_SEG_COPY::%s] make %d extra cop%s of %s [%lu %u]\n", __func__, 
+                    copy, copy > 1? "ies" : "y", asg->seg[i].name, g->vtx[i].len, g->vtx[i].cov);
 #endif
         } else if (copy == 0 && allow_del) {
             /*** TODO is this safe? **/
             asmg_vtx_del(g, i, 1);
 #ifdef DEBUG_SEG_COPY
-            fprintf(stderr, "[DEBUG_SEG_COPY::%s] delete seg %s [%u %u]\n", __func__,
-                    asg->seg[i].name, asg->seg[i].len, asg->seg[i].cov);
+            fprintf(stderr, "[DEBUG_SEG_COPY::%s] delete seg %s [%lu %u]\n", __func__,
+                    asg->seg[i].name, g->vtx[i].len, g->vtx[i].cov);
 #endif
         }
     }
@@ -989,7 +1099,7 @@ static llnode **graph_path_extension(asmg_t *g, llnode *root, kh_u32_t *seg_dups
     kdq_destroy_llnodep(node_q);
     km_destroy(km);
     kv_destroy(dups);
-    
+
     if (exceed_limit) {
         *n_leaf = 0;
         *exceed_limit_ = 1;
@@ -1021,25 +1131,80 @@ static inline void rev_path(path_t *path)
         path->v[i] ^= 1;
 }
 
-void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths)
+static uint64_t find_source_vtx(asmg_t *g, int use_max_scc)
 {
-    uint64_t i, j, s, n_seg, n_leaf, len;
+    uint64_t i, s, n_seg;
+    s = UINT64_MAX;
+    
+    if (!use_max_scc) {
+        // naively select the longest sequence
+        uint64_t m_len, len;
+        n_seg = g->n_vtx;
+        m_len = 0;
+        for (i = 0; i < n_seg; ++i) {
+            if (g->vtx[i].del) continue;
+            len = g->vtx[i].len * g->vtx[i].cov;
+            if (m_len < len) {
+                m_len = len;
+                s = i;
+            }
+        }
+    } else {
+        // select the largest sequence from the largest SCC
+        int c, m_c, n_scc, *scc;
+        uint64_t m_len, len, *lens;
+        n_seg = g->n_vtx * 2;
+
+        MYMALLOC(scc, n_seg);
+        // find strongly connected components
+        n_scc = asmg_tarjans_scc(g, scc);
+        
+        MYCALLOC(lens, n_scc);
+        // find larges SCC
+        for (i = 0; i < n_seg; ++i) {
+            if (scc[i] < 0) continue; // deleted vtx
+            if (scc[i] != scc[i^1] || (i & 1))
+                lens[scc[i]] += g->vtx[i>>1].len * g->vtx[i>>1].cov;
+        }
+        m_len = 0;
+        m_c = -1;
+        for (c = 0; c < n_scc; ++c) {
+            if (m_len < lens[c]) {
+                m_len = lens[c];
+                m_c = c;
+            }
+        }
+        if (m_c >= 0) {
+            m_len = 0;
+            for (i = 0; i < n_seg; ++i) {
+                if (scc[i] != m_c) continue;
+                len = g->vtx[i>>1].len * g->vtx[i>>1].cov;
+                if (m_len < len) {
+                    m_len = len;
+                    s = i;
+                }
+            }
+            s >>= 1;
+        }
+        free(scc);
+        free(lens);
+    }
+
+    return s;
+}
+
+void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, double sub_circ_minf, int is_pltd)
+{
+    uint64_t i, j, s, n_leaf;
     int circ, exceed_limit;
     asmg_t *g;
     llnode *root, *next_node, *node, **leaves;
     kvec_t(llnodep) leaf_node, root_node;
 
-    n_seg = asg->n_seg;
     g = asg->asmg;
-    len = 0;
-    s = UINT64_MAX;
-    for (i = 0; i < n_seg; ++i) {
-        if (g->vtx[i].del) continue;
-        if (g->vtx[i].len > len) {
-            s = i;
-            len = g->vtx[i].len;
-        }
-    }
+    
+    // find source vertex
+    s = find_source_vtx(g, 1);
 
     if (s == UINT64_MAX) return;
 
@@ -1121,29 +1286,46 @@ void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths)
 
         // calculate sequence length
         asmg_arc_t *a;
-        uint64_t l, l1;
+        uint64_t l, l1, *l_seg;
+        uint32_t *l_beg, *l_end;
         double cov, wl;
-
-        l = g->vtx[path.a[0]>>1].len;
+        
+        MYMALLOC(l_seg, path.n);
+        l_seg[0] = g->vtx[path.a[0]>>1].len;
+        l = l_seg[0];
         cov = g->vtx[path.a[0]>>1].cov;
         wl = cov * l;
         for (j = 1; j < path.n; ++j) {
             a = asmg_arc1(g, path.a[j-1], path.a[j]);
             assert(!!a);
-            l1 = g->vtx[path.a[j]>>1].len - a->lo;
+            l_seg[j-1] = l_seg[j-1] << 32 | a->ls;
+            l_seg[j] = g->vtx[path.a[j]>>1].len;
+            l1 = l_seg[j] - a->ls;
             cov = g->vtx[path.a[j]>>1].cov;
             l += l1;
             wl += cov * l1;
         }
+        l_seg[path.n-1] <<= 32;
+        
+        l_beg = l_end = 0;
         if (circ) {
             a = asmg_arc1(g, path.a[path.n-1], path.a[0]);
             assert(!!a);
-            l1 = a->lo;
+            l1 = a->ls;
             cov = g->vtx[path.a[0]>>1].cov;
             l -= l1;
             wl -= cov * l1;
+        } else {
+            MYMALLOC(l_beg, path.n);
+            MYMALLOC(l_end, path.n);
+            l_beg[0] = 0;
+            for (j = 1; j < path.n; ++j)
+                l_beg[j] = l_beg[j-1] + (l_seg[j-1] >> 32) - (uint32_t) l_seg[j-1];
+            for (j = 0; j < path.n; ++j) 
+                l_end[j] = l - l_beg[j] - (l_seg[j] >> 32);
+            assert(l_end[path.n-1] == 0);
         }
-
+        
         // replace copied vertices with originals
         khint32_t k32;
         for (j = 0; j < path.n; ++j) {
@@ -1154,6 +1336,57 @@ void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths)
 
         path_t p = {0, path.n, circ, 0, path.a, l, wl, .0};
         kv_push(path_t, *paths, p);
+        
+        if (!circ) {
+            // for linear paths add longest circular subpaths if at least sub_circ_minf sequences covered
+            double drop, max_drop, min_drop;
+            int beg, end, beg1, end1, n;
+            
+            uint64_t L = is_pltd? MIN(l, COMMON_AVG_PLTD_SIZE) : l;
+            max_drop = l - (double) L * sub_circ_minf;
+            n = path.n;
+            beg1 = end1 = -1;
+            min_drop = FLT_MAX;
+            for (beg = 0; beg < n; ++beg) {
+                if (l_beg[beg] > max_drop || l_beg[beg] >= min_drop)
+                    break;
+                for (end = n - 1; end >= beg; --end) {
+                    drop = l_beg[beg] + l_end[end];
+                    if (drop > max_drop || drop >= min_drop)
+                        break;
+                    // check if the path [beg, end] is a circular
+                    a = asmg_arc1(g, path.a[end], path.a[beg]);
+                    if (a) {
+                        beg1 = beg;
+                        end1 = end;
+                        min_drop = drop;
+                        break; // only need the longest subpath
+                    }
+                }
+            }
+
+            if (beg1 >= 0) {
+                // circular subpath found
+                // add subpath
+                uint32_t *v;
+                n = end1 - beg1 + 1;
+                MYMALLOC(v, n);
+                memcpy(v, &path.a[beg1], sizeof(uint32_t) * n);
+                wl = (l_seg[beg1] >> 32) * g->vtx[path.a[beg1]>>1].cov;
+                for (beg = beg1 + 1; beg <= end1; ++beg)
+                    wl += ((l_seg[beg] >> 32) - (uint32_t) l_seg[beg-1]) * g->vtx[path.a[beg]>>1].cov;
+                l -= l_beg[beg1] + l_end[end1];
+                a = asmg_arc1(g, v[n-1], v[0]);
+                l -= a->ls;
+                wl -= a->ls * g->vtx[v[0]>>1].cov;
+                path_t p1 = {0, n, 1, 0, v, l, wl, .0};
+                kv_push(path_t, *paths, p1);
+            }
+        }
+        
+        free(l_seg);
+        free(l_beg);
+        free(l_end);
     }
 
 final_clean:
@@ -1246,7 +1479,7 @@ path_t make_path_from_str(asg_t *asg, char *path_str, char *sid)
     len = g->vtx[vt.a[0]>>1].len;
     cov = g->vtx[vt.a[0]>>1].cov;
     wlen = (double) cov * len;
-    if (circ) len -= a->lo, wlen -= cov * a->lo;
+    if (circ) len -= a->ls, wlen -= cov * a->ls;
     for (i = 1; i < vt.n; ++i) {
         len1 = g->vtx[vt.a[i]>>1].len;
         cov = g->vtx[vt.a[i]>>1].cov;
@@ -1258,8 +1491,8 @@ path_t make_path_from_str(asg_t *asg, char *path_str, char *sid)
                     asg->seg[vt.a[i-1]>>1].name, "+-"[vt.a[i-1]&1],
                     asg->seg[vt.a[i]>>1].name, "+-"[vt.a[i]&1]);
         } else {
-            len -= a->lo;
-            wlen -= (double) cov * a->lo;
+            len -= a->ls;
+            wlen -= (double) cov * a->ls;
         }
     }
 
@@ -1330,7 +1563,7 @@ static void array_left_rotate(uint32_t arr[], uint32_t d, uint32_t n)
 KHASHL_MAP_INIT(KH_LOCAL, kh_str_t, kh_str, kh_cstr_t, uint64_t, kh_hash_str, kh_eq_str)
 KHASHL_MAP_INIT(KH_LOCAL, kh_s32_t, kh_s32, khint32_t, uint32_t, kh_hash_dummy, kh_eq_generic);
 
-static double path_rotate_core(asg_t *g, path_t *path, hmm_annot_v *annots, uint8_t og_type)
+static double path_rotate_core(asg_t *g, path_t *path, hmm_annot_db_t *annots, OG_TYPE_t og_type)
 {
     uint32_t i, j;
     const uint32_t g_n = athaliana_pltd_g71n;
@@ -1366,7 +1599,7 @@ static double path_rotate_core(asg_t *g, path_t *path, hmm_annot_v *annots, uint
     // on segs included in the path
     for (i = 0; i < annots->n; ++i) {
         annot = &annots->a[i];
-        if (annot->og_type == og_type) {
+        if (annot->og_type == (uint32_t) og_type) {
             k = kh_str_get(gene_db, annot->gname);
             k1 = kh_s32_get(segs, asg_name2id(g, annot->sname)); // sid might not set
             if (k < kh_end(gene_db) && k1 < kh_end(segs) && kh_val(segs, k1) == 1) {
@@ -1495,7 +1728,7 @@ rotate_done:
     return coeff;
 }
 
-void path_rotate(asg_t *g, path_t *path, hmm_annot_v *annots, uint8_t og_type)
+void path_rotate(asg_t *g, path_t *path, hmm_annot_db_t *annots, OG_TYPE_t og_type)
 {
     double coeff, coeff_rev;
     coeff = path_rotate_core(g, path, annots, og_type);
@@ -1616,16 +1849,17 @@ void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int
     if (path->circ && force_linear) {
         a = asmg_arc1(g, path->v[n-1], path->v[0]);
         assert(!!a);
-        lo = a->lo;
+        lo = a->ls;
         cov = g->vtx[path->v[0]>>1].cov;
     }
-
+    
     if (path->sid)
         fprintf(fo, ">%s\tlength=%u wlength=%.1f nv=%u circular=%s path=%s%c", path->sid, path->len + lo, path->wlen + (double) cov * lo,
                 path->nv, (force_linear || !path->circ)? "false" : "true", asg->seg[path->v[0]>>1].name, "+-"[path->v[0]&1]);
     else
-        fprintf(fo, ">%d\tlength=%u wlength=%.1f nv=%u circular=%s path=%s%c", id, path->len + lo, path->wlen + (double) cov * lo,
-                path->nv, (force_linear || !path->circ)? "false" : "true", asg->seg[path->v[0]>>1].name, "+-"[path->v[0]&1]);
+        fprintf(fo, ">ctg%06d%c\tlength=%u wlength=%.1f nv=%u circular=%s path=%s%c", id, (force_linear || !path->circ)? 'l' : 'c', 
+                path->len + lo, path->wlen + (double) cov * lo, path->nv, (force_linear || !path->circ)? "false" : "true", 
+                asg->seg[path->v[0]>>1].name, "+-"[path->v[0]&1]);
 
     for (i = 1; i < n; ++i)
         fprintf(fo, ",%s%c", asg->seg[path->v[i]>>1].name, "+-"[path->v[i]&1]);
@@ -1633,14 +1867,15 @@ void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int
 
     l = 0;
     v = path->v[0];
-    put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, (force_linear || !path->circ)? 0 : asmg_arc1(g, path->v[n-1], v)->lo, fo, &l, line_wd);
+    lo = (force_linear || !path->circ)? 0 : asmg_arc1(g, path->v[n-1], v)->ls;
+    put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, lo, fo, &l, line_wd);
 
     n_gap = 0;
     for (i = 1; i < n; ++i) {
         v = path->v[i];
         a = asmg_arc1(g, path->v[i-1], v);
         if (!!a) {
-            put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, a->lo, fo, &l, line_wd);
+            put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, a->ls, fo, &l, line_wd);
         } else {
             make_gap(fo, &l, line_wd, gap_size);
             put_chars(asg->seg[v>>1].seq, asg->seg[v>>1].len, v&1, 0, fo, &l, line_wd);
@@ -1654,7 +1889,54 @@ void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int
         fputc('\n', fo);
 }
 
-uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq_cf, int seq_id, int cmp_coeff)
+void path_add_hmm_annot_bed6(hmm_annot_bed6_db_t *bed_annots, hmm_annot_db_t *annot_db, asg_t *asg, path_t *path, 
+        int id, int force_linear, int gap_size, OG_TYPE_t og_type, double max_evalue)
+{
+    uint32_t i, n, v, lo, n_gap;
+    uint64_t l;
+    asmg_t *g;
+    asmg_arc_t *a;
+    char *cname;
+    
+    n = path->nv;
+    if (n == 0) return;
+
+    cname = 0;
+    if (path->sid) {
+        cname = strdup(path->sid);
+    } else {
+        MYMALLOC(cname, 12);
+        sprintf(cname, "ctg%06d%c", id, (force_linear || !path->circ)? 'l' : 'c');
+    }
+    
+    if (bed_annots->n_seg == bed_annots->m_seg) {
+        ++bed_annots->m_seg;
+        kroundup32(bed_annots->m_seg);
+        MYREALLOC(bed_annots->snames, bed_annots->m_seg);
+    }
+    bed_annots->snames[bed_annots->n_seg++] = cname;
+
+    g = asg->asmg;
+    l = 0;
+    v = path->v[0];
+    lo = (force_linear || !path->circ)? 0 : asmg_arc1(g, path->v[n-1], v)->ls;
+    hmm_annot_bed6_sname_add(bed_annots, annot_db, cname, asg->seg[v>>1].name, asg->seg[v>>1].len, lo, v&1, l, og_type, max_evalue);
+    l += asg->seg[v>>1].len - lo;
+
+    n_gap = 0;
+    for (i = 1; i < n; ++i) {
+        v = path->v[i];
+        a = asmg_arc1(g, path->v[i-1], v);
+        if (!a) l += gap_size, ++n_gap;
+        hmm_annot_bed6_sname_add(bed_annots, annot_db, cname, asg->seg[v>>1].name, asg->seg[v>>1].len, a->ls, v&1, l, og_type, max_evalue);
+        l += asg->seg[v>>1].len - a->ls;
+    }
+
+    if (!path->circ || !force_linear)
+        assert(l - (uint64_t) n_gap * gap_size == path->len);
+}
+
+uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq_cf, int seq_id, int is_pltd)
 {
     if (paths->n == 0)
         return UINT32_MAX;
@@ -1677,12 +1959,15 @@ uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq
                 k = i;
             }
         }
-        if (k != UINT32_MAX && (double) l / paths->a[j].len >= seq_cf)
-            j = k;
+        if (k != UINT32_MAX) {
+            uint64_t L = paths->a[j].len;
+            if (is_pltd) L = MIN(L, COMMON_AVG_PLTD_SIZE);
+            if ((double) l / L >= seq_cf) j = k;
+        }
     }
 
     // TODO need more sophisticated rules for cmp_coeff
-    if (cmp_coeff) {
+    if (is_pltd) {
         double coeff;
         uint32_t circ;
         circ = (paths->a[j].circ || type);
@@ -1872,12 +2157,14 @@ int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, in
     for (i = 0; i < n_seg; ++i) {
         if (visited[i] || g->vtx[i].del) continue;
         asg->asmg = asg_make_asmg_copy(g, 0);
-        uint32_t *vlist = asmg_subgraph(asg->asmg, &i, 1, 0, 0, 0, 1);
-        free(vlist);
-        avg_cov = estimate_sequence_copy_number_from_coverage(asg, 0, min_cf, 0, max_copy);
+        asmg_subgraph(asg->asmg, &i, 1, 0, 0, 0, 1);
+        avg_cov = graph_sequence_coverage_precise(asg, min_cf, 0, max_copy, 0);
+        if (verbose > 1)
+            fprintf(stderr, "[M::%s] subgraph seeding from %s per copy average coverage: %.3f\n", 
+                    __func__, asg->seg[i].name, avg_cov);
         for (j = 0; j < n_seg; ++j) {
             if (asg->asmg->vtx[j].del) continue;
-            if (avg_cov && asg->seg[j].cov / avg_cov < min_cf)
+            if (avg_cov && asg->asmg->vtx[j].cov / avg_cov < min_cf)
                 kv_push(uint32_t, rm_v, j);
             visited[j] = 1;
         }
@@ -2121,7 +2408,7 @@ static inline int gfa_parse_S(asg_t *g, char *s)
                 s_SBP_COV = gfa_aux_get(l_aux, aux, tag);
                 if (s_SBP_COV && *s_SBP_COV == TAG_SBP_COV[3]) {
                     dv = gfa_aux_decimal_value(s_SBP_COV);
-                    s->cov = len>0? dv/len : dv;
+                    s->cov = len > 0? dv/len : dv;
                 } else {
                     fprintf(stderr, "[W::%s] for segment '%s', %s tag is absent\n", __func__, seg, tag);
                 }
@@ -2146,6 +2433,8 @@ static inline int gfa_parse_S(asg_t *g, char *s)
                 s->cov = len > 0? dv/len : dv;
             }
         }
+        if (s->cov == 0)
+            fprintf(stderr, "[W::%s] the coverage of segment '%s' is zero\n", __func__, seg);
         free(aux);
     } else return PARSE_S_ERR;
 
@@ -2213,7 +2502,7 @@ static int gfa_parse_L(asg_t *g, char *s)
         asmg_arc_t *arc;
         v = asg_add_seg(g, segv, 1) << 1 | oriv;
         w = asg_add_seg(g, segw, 1) << 1 | oriw;
-        arc = asmg_arc_add(g->asmg, v, w, ov, UINT64_MAX, 0, 0);
+        arc = asmg_arc_add(g->asmg, v, w, 0, ov, UINT64_MAX, 0, 0);
         l_aux = gfa_aux_parse(rest, &aux, &m_aux); // parse optional tags
         if (l_aux) {
             uint8_t *s_ARC_COV = 0;
@@ -2373,7 +2662,7 @@ void asg_stat(asg_t *asg, FILE *fo)
 
 void asg_print(asg_t *g, FILE *fo, int no_seq)
 {
-    uint32_t i;
+    uint32_t i, cov;
     uint64_t k;
     asmg_t *asmg = g->asmg;
 
@@ -2382,10 +2671,11 @@ void asg_print(asg_t *g, FILE *fo, int no_seq)
         const asg_seg_t *s = &g->seg[i];
         // seg and vtx indices are interchangeable
         if (asmg && asmg->vtx[i].del) continue;
+        cov = asmg? asmg->vtx[i].cov : s->cov;
         fprintf(fo, "S\t%s\t", s->name);
         if (s->seq && !no_seq) fputs(s->seq, fo);
         else fputc('*', fo);
-        fprintf(fo, "\tLN:i:%u\tKC:i:%lu\tSC:f:%.3f\n", s->len, (uint64_t)s->len*s->cov, (double)s->cov);
+        fprintf(fo, "\tLN:i:%u\tKC:i:%lu\tSC:f:%.3f\n", s->len, (uint64_t)s->len*cov, (double)cov);
     }
 
     if (asmg == 0) return;
@@ -2393,7 +2683,7 @@ void asg_print(asg_t *g, FILE *fo, int no_seq)
         const asmg_arc_t *a = &asmg->arc[k];
         if (a->del || a->comp) continue;
         fprintf(fo, "L\t%s\t%c\t%s\t%c\t%luM\tEC:i:%u\n", g->seg[a->v>>1].name, "+-"[a->v&1], 
-                g->seg[a->w>>1].name, "+-"[a->w&1], a->lo, a->cov);
+                g->seg[a->w>>1].name, "+-"[a->w&1], a->ls, a->cov);
     }
 }
 
@@ -2416,22 +2706,6 @@ void asg_print_fa(asg_t *g, FILE *fo, int line_wd)
  * Assembly Graph Annotation *
  * ***************************/
 
-// annotations comparison function sid - og_type - gid - score
-static int annot_cmpfunc_s(const void *a, const void *b)
-{
-    hmm_annot_t *x, *y;
-    x = (hmm_annot_t *) a;
-    y = (hmm_annot_t *) b;
-
-    if (x->sid != y->sid)
-        return (x->sid > y->sid) - (x->sid < y->sid);
-    if (x->og_type != y->og_type)
-        return (x->og_type > y->og_type) - (x->og_type < y->og_type);
-    if (x->gid != y->gid)
-        return (x->gid > y->gid) - (x->gid < y->gid);
-    return (x->score < y->score) - (x->score > y->score);
-}
-
 static int og_cmpfunc_r(const void *a, const void *b)
 {
     return (((og_component_t *) a)->score < ((og_component_t *) b)->score) -
@@ -2453,6 +2727,7 @@ void og_component_destroy(og_component_t *og_component)
 {
     if (og_component->v) free(og_component->v);
     if (og_component->g) free(og_component->g);
+    if (og_component->asmg) asmg_destroy(og_component->asmg);
 }
 
 void og_component_v_destroy(og_component_v *component_v)
@@ -2487,14 +2762,61 @@ static uint32_t max2(double *a, uint32_t n, uint32_t *_smax)
     return imax;
 }
 
-static void fix_og_misclassification(og_component_v *component_v)
+static void fix_og_misclassification(og_component_v *component_v, int verbose)
 {
     // TODO fix this by maybe improving the specificity of the HMM database
     // revisit to deal with mito misclassification
     // find the best pltd component
-    uint32_t i, p_b, p_b1;
+    uint32_t i, j, m, n, p_b, p_b1, genid, *mito_gen, *pltd_gen;
+    uint64_t x;
     double p_s, p_s1;
     og_component_t *component;
+    kvec_t(uint64_t) gen_list;
+    OG_TYPE_t og_type;
+    
+    n = component_v->n;
+    kv_init(gen_list);
+    // collect best gene hits in each subgraph
+    // pack in the component id
+    for (i = 0; i < n; ++i) {
+        component = &component_v->a[i];
+        m = gen_list.n;
+        kv_pushn(uint64_t, gen_list, component->g, component->ng);
+        for (j = m; j < gen_list.n; ++j) {
+            x = gen_list.a[j];
+            gen_list.a[j] = (x & 0xFFFFFFFF00000000ULL) | ((uint32_t) x << 16 | i);
+        }
+    }
+    
+    if (gen_list.n == 0)
+        return;
+
+    // sort by gid and then score - descending order
+    qsort(gen_list.a, gen_list.n, sizeof(uint64_t), u64_cmpfunc_r);
+    
+    MYCALLOC(mito_gen, n);
+    MYCALLOC(pltd_gen, n);
+    genid = gen_list.a[0] >> 32;
+    for (i = 0, j = 0, m = gen_list.n; i < m; ++i) {
+        if (gen_list.a[i] >> 32 != genid ||
+                i == m - 1) {
+            og_type = (gen_list.a[i] >> 32) & 0x3;
+            if (og_type != OG_MITO &&
+                    og_type != OG_PLTD)
+                continue;
+            if (i == j || 
+                   (double) ((gen_list.a[j+1] >> 16) & 0xFFFFULL) < 
+                   (double) ((gen_list.a[j] >> 16) & 0xFFFFULL) * 0.8) {
+                x = gen_list.a[j] & 0xFFFFULL;
+                if (og_type == OG_MITO)
+                    ++mito_gen[x];
+                else
+                    ++pltd_gen[x];
+            }
+            genid = gen_list.a[i] >> 32;
+            j = i;
+        }
+    }
 
     p_b = p_b1 = UINT32_MAX;
     p_s = p_s1 = 0;
@@ -2519,84 +2841,273 @@ static void fix_og_misclassification(og_component_v *component_v)
             component = &component_v->a[i];
             if (component->type != OG_PLTD)
                 continue;
-            if (component->score < component->sscore * PLTD_TO_MITO_FST ||
-                    component->len > COMMON_MAX_PLTD_SIZE) {
-                component->type = OG_MITO;
+            if (pltd_gen[i] > mito_gen[i] * PLTD_TO_MITO_FST[1])
+                continue;
+            if (component->score > component->sscore * PLTD_TO_MITO_FST[1])
+                continue;
+            if (component->score < component->sscore * PLTD_TO_MITO_FST[0] ||
+                    (component->len < COMMON_MIN_PLTD_SIZE ||
+                     component->len > COMMON_MAX_PLTD_SIZE)) {
                 double tmp = component->score;
                 component->score = component->sscore;
                 component->sscore = tmp;
+                component->type = component->score > .0? OG_MITO : OG_UNCLASSIFIED;
+                if (verbose > 0)
+                    fprintf(stderr, "[M::%s] change subgraph organelle type annotation: PLTD [S=%.3f G=%u] -> MITO [S=%.3f G=%u]\n",
+                            __func__, component->sscore, pltd_gen[i], component->score, mito_gen[i]);
             }
         }
     }
+
+    free(mito_gen);
+    free(pltd_gen);
+    kv_destroy(gen_list);
 }
 
-// this collects top n_core unique genes from each subgraph and calculates total scores
-// TODO consider the bias introduced by assembly graph size such as nuclear regions with numts
-og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval, 
-        int n_core, int min_len, int min_score, double **_annot_score, int verbose)
+double *get_sequence_annot_score(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
+        int n_core, int verbose)
 {
-    uint32_t i, j, k, n, m, n_seg, n_gene, m_gene, sid, gid, imax, smax;
-    uint64_t *gene_idx;
+    uint32_t i, j, k, n, n_seg, n_gene, m_gene, gid;
+    uint32_t *asg_snameid_map;
+    hmm_annot_t *annots, *annot;
+    double *annot_score, *gene_score, *a_s;
+
+    n_gene = annot_db->n;
+    n_seg = asg->n_seg;
+
+    if (n_gene == 0) return 0;
+    if (n_core == 0) n_core = INT_MAX;
+    
+    m_gene = annot_db->n_gene;
+
+    // sort annotations by sid - og_type - gid - score
+    hmm_annot_db_sort(annot_db, ORDER_SID_OG);
+    // build asg sname to annot_db sname id map
+    MYMALLOC(asg_snameid_map, n_seg);
+    for (i = 0; i < n_seg; ++i)
+        asg_snameid_map[i] = hmm_annot_sname2id(annot_db, asg->seg[i].name);
+
+    // calculate annotation score for each seg
+    MYCALLOC(annot_score, n_seg * 4);
+    MYMALLOC(gene_score, m_gene * 4);
+    for (i = 0; i < n_seg; ++i) {
+        annots = hmm_annot_db_index_query(annot_db, asg_snameid_map[i], &n);
+        if (!annots) continue;
+        
+        MYBZERO(gene_score, m_gene * 4);
+        for (j = 0; j < n; ++j) {
+            annot = &annots[j];
+            if (annot->evalue > max_eval ||
+                    (no_trn && is_trn(annot)) ||
+                    (no_rrn && is_rrn(annot)))
+                continue;
+            gid = annot->og_type * m_gene + annot->gid;
+            if (gene_score[gid] < annot->score)
+                gene_score[gid] = annot->score;
+        }
+
+        // sort annotation scores for each og_type
+        // and get the sum annotation score
+        a_s = &annot_score[i * 4];
+        for (j = 0; j < 4; ++j) {
+            qsort(&gene_score[j * m_gene], m_gene, sizeof(double), dbl_cmpfunc_r);
+            n = MIN((uint32_t) n_core, m_gene);
+            for (k = 0 ; k < n; ++k)
+                a_s[j] += gene_score[j * m_gene + k];
+        }
+        
+        if (verbose > 0)
+            fprintf(stderr, "[M::%s] sequence %s: size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f\n",
+                    __func__, asg->seg[i].name, asg->seg[i].len, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI]);
+    }
+    
+    free(gene_score);
+    free(asg_snameid_map);
+
+    return annot_score;
+}
+
+og_component_v *annot_sequence_og_type(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
+        int n_core, int min_len, int min_score, int fix_og, int verbose)
+{
+    uint32_t i, j, k, n, n_seg, n_gene, m_gene, gid, imax, smax;
+    uint32_t *asg_snameid_map;
     hmm_annot_t *annots, *annot;
     double a_s[4], *annot_score;
-    int len, nv;
-    uint8_t *visited, og_t;
+    OG_TYPE_t og_t;
     og_component_t *component;
     og_component_v *component_v;
-    asmg_t *g;
 
-    n_gene = annot_v->n;
-    annots = annot_v->a;
+    n_gene = annot_db->n;
     n_seg = asg->n_seg;
 
     if (n_gene == 0) return 0;
     if (n_core == 0) n_core = INT_MAX;
 
-    m_gene = 0;
-    for (i = 0; i < n_gene; ++i) {
-        // set seg id in case not set yet
-        annots[i].sid = asg_name2id(asg, annots[i].sname);
-        if (annots[i].gid > m_gene)
-            m_gene = annots[i].gid;
-    }
-    m_gene += 1; // m_gene is the max number of unique genes
+    m_gene = annot_db->n_gene;
 
     // sort annotations by sid - og_type - gid - score
-    qsort(annots, n_gene, sizeof(hmm_annot_t), annot_cmpfunc_s);
-    
-    // index annotation for fast access to gene list of seqs
-    MYCALLOC(gene_idx, n_seg);
-    sid = annots[0].sid;
-    for (i = 1, j = 0; i < n_gene; ++i) {
-        if (sid != annots[i].sid) {
-            gene_idx[sid] = (uint64_t) j << 32 | (i - j);
-            j = i;
-            sid = annots[i].sid;
+    hmm_annot_db_sort(annot_db, ORDER_SID_OG);
+    // build asg sname to annot_db sname id map
+    MYMALLOC(asg_snameid_map, n_seg);
+    for (i = 0; i < n_seg; ++i)
+        asg_snameid_map[i] = hmm_annot_sname2id(annot_db, asg->seg[i].name);
+
+    MYMALLOC(annot_score, m_gene * 4);
+    MYCALLOC(component_v, 1);
+    MYCALLOC(component_v->a, n_seg);
+    component_v->n = n_seg;
+    component_v->m = n_seg;
+    for (i = 0; i < n_seg; ++i) {
+        component_v->a[i].type = (uint32_t) OG_UNCLASSIFIED;
+        if (asg->asmg->vtx[i].del)
+            continue;
+
+        MYBZERO(annot_score, m_gene * 4);
+        annots = hmm_annot_db_index_query(annot_db, asg_snameid_map[i], &n);
+        if (annots) {
+            for (k = 0; k < n; ++k) {
+                annot = &annots[k];
+                if (annot->evalue > max_eval ||
+                        (no_trn && is_trn(annot)) ||
+                        (no_rrn && is_rrn(annot)))
+                    continue;
+                gid = annot->og_type * m_gene + annot->gid;
+                if (annot_score[gid] < annot->score)
+                    annot_score[gid] = annot->score;
+            }
         }
+
+        // sort annotation scores for each og_type
+        // and get the sum annotation score
+        MYBZERO(a_s, 4);
+        for (j = 0; j < 4; ++j) {
+            qsort(&annot_score[j * m_gene], m_gene, sizeof(double), dbl_cmpfunc_r);
+            n = MIN((uint32_t) n_core, m_gene);
+            for (k = 0 ; k < n; ++k)
+                a_s[j] += annot_score[j * m_gene + k];
+        }
+        imax = max2(a_s, 4, &smax);
+        og_t = OG_UNCLASSIFIED;
+        if (a_s[imax] >= min_score)
+            // 1, mito; 2, pltd; 3, mini
+            og_t = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
+
+        if (og_t != OG_UNCLASSIFIED) {
+            // make seg list
+            uint32_t *comp_v;
+            MYMALLOC(comp_v, 1);
+            comp_v[0] = i;
+            // make gene list
+            // get all genes in the component
+            kvec_t(uint64_t) comp_g;
+            kv_init(comp_g);
+            annots = hmm_annot_db_index_query(annot_db, asg_snameid_map[i], &n);
+            if (annots) {
+                for (k = 0; k < n; ++k) {
+                    annot = &annots[k];
+                    if (annot->evalue > max_eval ||
+                            (no_trn && is_trn(annot)) ||
+                            (no_rrn && is_rrn(annot)))
+                        continue;
+                    // gid:30 | OG_TYPE:2 | score:32
+                    kv_push(uint64_t, comp_g,
+                            ((uint64_t) annot->gid << 2 | annot->og_type) << 32 |
+                            (uint32_t) annot->score);
+                }
+            }
+            // sort by gid and then score - descending order
+            qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
+            // keep only the best hit for each gene
+            k = 0;
+            gid = UINT32_MAX;
+            for (j = 0; j < comp_g.n; ++j) {
+                if (comp_g.a[j] >> 32 != gid) {
+                    comp_g.a[k++] = comp_g.a[j];
+                    gid = comp_g.a[j] >> 32;
+                }
+            }
+            comp_g.n = comp_g.m = k;
+            MYREALLOC(comp_g.a, k);
+
+            // add og_component
+            component = &component_v->a[i];
+            component->type = (uint32_t) og_t;
+            component->score = a_s[imax];
+            component->sscore = a_s[smax];
+            component->len = asg->seg[i].len;
+            component->nv = 1;
+            component->v = comp_v;
+            component->ng = comp_g.n;
+            component->g = comp_g.a;
+            component->asmg = 0;
+        }
+
+        if (verbose > 0)
+            fprintf(stderr, "[M::%s] sequence %s: size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
+                    __func__, asg->seg[i].name, asg->seg[i].len, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI], og_t);
     }
-    gene_idx[sid] = (uint64_t) j << 32 | (i - j);
+
+    free(annot_score);
+    free(asg_snameid_map);
     
+    if (fix_og) fix_og_misclassification(component_v, verbose);
+
+    return component_v;
+}
+
+// this collects top n_core unique genes from each subgraph and calculates total scores
+// TODO consider the bias introduced by assembly graph size such as nuclear regions with numts
+og_component_v *annot_subgraph_og_type(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval, 
+        int n_core, int min_len, int min_score, int fix_og, int verbose)
+{
+    uint32_t i, j, k, n, n_seg, n_gene, m_gene, gid, imax, smax;
+    uint32_t *asg_snameid_map;
+    hmm_annot_t *annots, *annot;
+    double a_s[4], *annot_score;
+    int len, nv;
+    uint8_t *visited;
+    OG_TYPE_t og_t;
+    og_component_t *component;
+    og_component_v *component_v;
+    asmg_t *g;
+
+    n_gene = annot_db->n;
+    n_seg = asg->n_seg;
+
+    if (n_gene == 0) return 0;
+    if (n_core == 0) n_core = INT_MAX;
+
+    m_gene = annot_db->n_gene;
+
+    // sort annotations by sid - og_type - gid - score
+    hmm_annot_db_sort(annot_db, ORDER_SID_OG);
+    // build asg sname to annot_db sname id map
+    MYMALLOC(asg_snameid_map, n_seg);
+    for (i = 0; i < n_seg; ++i)
+        asg_snameid_map[i] = hmm_annot_sname2id(annot_db, asg->seg[i].name);
+
     // extract each subgraph and do classification
     // TODO deal with graphs when mito and pltd are in the same subgraph
     MYMALLOC(annot_score, m_gene * 4);
     MYCALLOC(component_v, 1);
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
-        if (visited[i] || asg->asmg->vtx[i].del) continue;
+        if (visited[i] || asg->asmg->vtx[i].del)
+            continue;
         g = asg_make_asmg_copy(asg->asmg, 0);
-        uint32_t *vlist = asmg_subgraph(g, &i, 1, 0, 0, 0, 1);
-        free(vlist);
+        asmg_subgraph(g, &i, 1, 0, 0, 0, 1);
         MYBZERO(annot_score, m_gene * 4);
         len = nv = 0;
         for (j = 0; j < n_seg; ++j) {
             if (!g->vtx[j].del) {
-                m = (uint32_t) (gene_idx[j] >> 32);
-                n = (uint32_t) gene_idx[j];
-                if (n > 0) {
+                annots = hmm_annot_db_index_query(annot_db, asg_snameid_map[j], &n);
+                if (annots) {
                     for (k = 0; k < n; ++k) {
-                        annot = &annots[m + k];
+                        annot = &annots[k];
                         if (annot->evalue > max_eval ||
-                                (no_trn && is_trn(annot)))
+                                (no_trn && is_trn(annot)) ||
+                                (no_rrn && is_rrn(annot)))
                             continue;
                         gid = annot->og_type * m_gene + annot->gid;
                         if (annot_score[gid] < annot->score)
@@ -2625,137 +3136,112 @@ og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, 
             // 1, mito; 2, pltd; 3, mini
             og_t = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
 
-        if (og_t != OG_UNCLASSIFIED) {
-            // make seg list
-            uint32_t *comp_v;
-            MYMALLOC(comp_v, nv);
-            k = 0;
-            for (j = 0; j < n_seg; ++j)
-                if (!g->vtx[j].del)
-                    comp_v[k++] = j;
-            // make gene list
-            // get all genes in the component
-            kvec_t(uint64_t) comp_g;
-            kv_init(comp_g);
-            for (j = 0; j < n_gene; ++j) {
-                annot = &annots[j];
-                if (g->vtx[annot->sid].del ||
-                        annot->evalue > max_eval ||
-                        (no_trn && is_trn(annot)))
-                    continue;
-                // gid:30 | OG_TYPE:2 | score:32
-                kv_push(uint64_t, comp_g,
-                        ((uint64_t) annot->gid << 2 | annot->og_type) << 32 | 
-                        (uint32_t) annot->score);
-            }
-            // sort by gid and then score - descending order
-            qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
-            // keep only the best hit for each gene
-            k = 0;
-            gid = UINT32_MAX;
-            for (j = 0; j < comp_g.n; ++j) {
-                if (comp_g.a[j] >> 32 != gid) {
-                    comp_g.a[k++] = comp_g.a[j];
-                    gid = comp_g.a[j] >> 32;
-                }
-            }
-            comp_g.n = comp_g.m = k;
-            MYREALLOC(comp_g.a, k);
-
-            // add og_component
-            kv_pushp(og_component_t, *component_v, &component);
-            component->type = og_t;
-            component->score = a_s[imax];
-            component->sscore = a_s[smax];
-            component->len = len;
-            component->nv = nv;
-            component->v = comp_v;
-            component->ng = comp_g.n;
-            component->g = comp_g.a;
+        if (og_t == OG_UNCLASSIFIED) {
+            asmg_destroy(g);
+            continue;
         }
         
-        asmg_destroy(g);
+        // make seg list
+        uint32_t *comp_v;
+        MYMALLOC(comp_v, nv);
+        k = 0;
+        for (j = 0; j < n_seg; ++j)
+            if (!g->vtx[j].del)
+                comp_v[k++] = j;
+        // make gene list
+        // get all genes in the component
+        kvec_t(uint64_t) comp_g;
+        kv_init(comp_g);
+        for (j = 0; j < nv; ++j) {
+            annots = hmm_annot_db_index_query(annot_db, asg_snameid_map[comp_v[j]], &n);
+            if (annots) {
+                for (k = 0; k < n; ++k) {
+                    annot = &annots[k];
+                    if (annot->evalue > max_eval ||
+                            (no_trn && is_trn(annot)) ||
+                            (no_rrn && is_rrn(annot)))
+                        continue;
+                    // gid:30 | OG_TYPE:2 | score:32
+                    kv_push(uint64_t, comp_g,
+                            ((uint64_t) annot->gid << 2 | annot->og_type) << 32 |
+                            (uint32_t) annot->score);
+                }
+            }
+        }
+        // sort by gid and then score - descending order
+        qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
+        // keep only the best hit for each gene
+        k = 0;
+        gid = UINT32_MAX;
+        for (j = 0; j < comp_g.n; ++j) {
+            if (comp_g.a[j] >> 32 != gid) {
+                comp_g.a[k++] = comp_g.a[j];
+                gid = comp_g.a[j] >> 32;
+            }
+        }
+        comp_g.n = comp_g.m = k;
+        MYREALLOC(comp_g.a, k);
 
+        // add og_component
+        kv_pushp(og_component_t, *component_v, &component);
+        component->type = (uint32_t) og_t;
+        component->score = a_s[imax];
+        component->sscore = a_s[smax];
+        component->len = len;
+        component->nv = nv;
+        component->v = comp_v;
+        component->ng = comp_g.n;
+        component->g = comp_g.a;
+        component->asmg = g;
+        
         if (verbose > 0)
             fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
                     __func__, asg->seg[i].name, nv, len, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI], og_t);
     }
     
-    if (_annot_score) {
-        MYCALLOC(*_annot_score, n_seg * 4);
-
-        // calculate annotation score for each seg
-        // reuse annot_score
-        for (i = 0; i < n_seg; ++i) {
-            m = (uint32_t) (gene_idx[i] >> 32);
-            n = (uint32_t) gene_idx[i];
-            if (n == 0) continue;
-
-            MYBZERO(annot_score, m_gene * 4);
-            for (j = 0; j < n; ++j) {
-                annot = &annots[m + j];
-                if (annot->evalue > max_eval ||
-                        (no_trn && is_trn(annot)))
-                    continue;
-                gid = annot->og_type * m_gene + annot->gid;
-                if (annot_score[gid] < annot->score)
-                    annot_score[gid] = annot->score;
-            }
-
-            // sort annotation scores for each og_type
-            // and get the sum annotation score
-            MYBZERO(a_s, 4);
-            for (j = 0; j < 4; ++j) {
-                qsort(&annot_score[j * m_gene], m_gene, sizeof(double), dbl_cmpfunc_r);
-                n = MIN((uint32_t) n_core, m_gene);
-                for (k = 0 ; k < n; ++k)
-                    a_s[j] += annot_score[j * m_gene + k];
-            }
-            
-            memcpy((*_annot_score)+i*4, a_s, sizeof(double)*4);
-        }
-    }
-
     free(annot_score);
-    free(gene_idx);
     free(visited);
+    free(asg_snameid_map);
 
-    fix_og_misclassification(component_v);
+    if (fix_og) fix_og_misclassification(component_v, verbose);
 
     qsort(component_v->a, component_v->n, sizeof(og_component_t), og_cmpfunc_r);
 
     return component_v;
 }
 
-
 // this collects top n_core genes from this sequence and calculates total scores for each subgraph
 // it might be biased when there are multiple copies of some genes
 // especially for subgraphs from repetitive regions
-// this function has been replaced by annot_seq_og_type
-og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval,
+// this function has been replaced by annot_subgraph_og_type
+og_component_v *annot_subgraph_og_type1(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
         int n_core, int min_len, int min_score, double **_annot_score, int verbose)
 {
-    uint32_t i, j, k, n_seg, n_gene, sid, gid, imax, smax;
+    uint32_t i, j, k, n_seg, m_seg, n_gene, sid, gid, imax, smax;
+    uint32_t *ann_snameid_map;
     hmm_annot_t *annots, *annot;
     double a_s[4], *annot_score;
     int a_n[4], len, nv;
-    uint8_t *visited, og_t;
+    uint8_t *visited;
+    OG_TYPE_t og_t;
     og_component_t *component;
     og_component_v *component_v;
     asmg_t *g;
 
-    n_gene = annot_v->n;
-    annots = annot_v->a;
+    n_gene = annot_db->n;
+    annots = annot_db->a;
     n_seg = asg->n_seg;
+    m_seg = annot_db->n_seg;
 
     if (n_gene == 0) return 0;
 
-    // set seg id in case not set yet
-    for (i = 0; i < n_gene; ++i)
-        annots[i].sid = asg_name2id(asg, annots[i].sname);
-
     // sort annotations by sid - score
-    qsort(annots, n_gene, sizeof(hmm_annot_t), annot_cmpfunc_s);
+    hmm_annot_db_sort(annot_db, ORDER_SID_OG);
+
+    // build annot_db sname to asg sname id map
+    MYMALLOC(ann_snameid_map, m_seg);
+    for (i = 0; i < m_seg; ++i)
+        ann_snameid_map[i] = asg_name2id(asg, annot_db->snames[i]);
 
     // calculate annotation score for each seg
     sid = annots[0].sid;
@@ -2765,27 +3251,31 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
     for (i = 0; i < n_gene; ++i) {
         annot = &annots[i];
         if (annot->sid != sid) {
-            memcpy(annot_score+sid*4, a_s, sizeof(double)*4);
+            // here remember to convert annotation sid to asg sid
+            if (ann_snameid_map[sid] != UINT32_MAX)
+                memcpy(annot_score+ann_snameid_map[sid]*4, a_s, sizeof(double)*4);
             sid = annot->sid;
             MYBZERO(a_s, 4);
             MYBZERO(a_n, 4);
         }
-        if (annot->evalue > max_eval || (no_trn && is_trn(annot)))
+        if (annot->evalue > max_eval || (no_trn && is_trn(annot)) || (no_rrn && is_rrn(annot)))
             continue;
         if (a_n[annot->og_type]++ < n_core)
             a_s[annot->og_type] += annot->score;
     }
-    memcpy(annot_score+sid*4, a_s, sizeof(double)*4);
+    // here remember to convert annotation sid to asg sid
+    if (ann_snameid_map[sid] != UINT32_MAX)
+        memcpy(annot_score+ann_snameid_map[sid]*4, a_s, sizeof(double)*4);
 
     // extract each subgraph and do classification
     // TODO deal with graphs when mito and pltd are in the same subgraph
     MYCALLOC(component_v, 1);
     MYCALLOC(visited, n_seg);
     for (i = 0; i < n_seg; ++i) {
-        if (visited[i] || asg->asmg->vtx[i].del) continue;
+        if (visited[i] || asg->asmg->vtx[i].del)
+            continue;
         g = asg_make_asmg_copy(asg->asmg, 0);
-        uint32_t *vlist = asmg_subgraph(g, &i, 1, 0, 0, 0, 1);
-        free(vlist);
+        asmg_subgraph(g, &i, 1, 0, 0, 0, 1);
         MYBZERO(a_s, 4);
         len = nv = 0;
         for (j = 0; j < n_seg; ++j) {
@@ -2803,56 +3293,61 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
             // 1, mito; 2, pltd; 3, mini
             og_t = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
 
-        if (og_t != OG_UNCLASSIFIED) {
-            // make seg list
-            uint32_t *comp_v;
-            MYMALLOC(comp_v, nv);
-            k = 0;
-            for (j = 0; j < n_seg; ++j)
-                if (!g->vtx[j].del)
-                    comp_v[k++] = j;
-            // make gene list
-            // get all genes in the component
-            kvec_t(uint64_t) comp_g;
-            kv_init(comp_g);
-            for (j = 0; j < n_gene; ++j) {
-                annot = &annots[j];
-                if (g->vtx[annot->sid].del ||
-                        annot->evalue > max_eval ||
-                        (no_trn && is_trn(annot)))
-                    continue;
-                // gid:30 | OG_TYPE:2 | score:32
-                kv_push(uint64_t, comp_g,
-                        ((uint64_t) annot->gid << 2 | annot->og_type) << 32 | 
-                        (uint32_t) annot->score);
-            }
-            // sort by gid and then score - descending order
-            qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
-            // keep only the best hit for each gene
-            k = 0;
-            gid = UINT32_MAX;
-            for (j = 0; j < comp_g.n; ++j) {
-                if (comp_g.a[j] >> 32 != gid) {
-                    comp_g.a[k++] = comp_g.a[j];
-                    gid = comp_g.a[j] >> 32;
-                }
-            }
-            comp_g.n = comp_g.m = k;
-            MYREALLOC(comp_g.a, k);
-
-            // add og_component
-            kv_pushp(og_component_t, *component_v, &component);
-            component->type = og_t;
-            component->score = a_s[imax];
-            component->sscore = a_s[smax];
-            component->len = len;
-            component->nv = nv;
-            component->v = comp_v;
-            component->ng = comp_g.n;
-            component->g = comp_g.a;
+        if (og_t == OG_UNCLASSIFIED) {
+            asmg_destroy(g);
+            continue;
         }
+        
+        // make seg list
+        uint32_t *comp_v;
+        MYMALLOC(comp_v, nv);
+        k = 0;
+        for (j = 0; j < n_seg; ++j)
+            if (!g->vtx[j].del)
+                comp_v[k++] = j;
+        // make gene list
+        // get all genes in the component
+        kvec_t(uint64_t) comp_g;
+        kv_init(comp_g);
+        for (j = 0; j < n_gene; ++j) {
+            annot = &annots[j];
+            sid = ann_snameid_map[annot->sid];
+            if (sid == UINT32_MAX ||
+                    g->vtx[sid].del ||
+                    annot->evalue > max_eval ||
+                    (no_trn && is_trn(annot)) || 
+                    (no_rrn && is_rrn(annot)))
+                continue;
+            // gid:30 | OG_TYPE:2 | score:32
+            kv_push(uint64_t, comp_g,
+                    ((uint64_t) annot->gid << 2 | annot->og_type) << 32 | 
+                    (uint32_t) annot->score);
+        }
+        // sort by gid and then score - descending order
+        qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
+        // keep only the best hit for each gene
+        k = 0;
+        gid = UINT32_MAX;
+        for (j = 0; j < comp_g.n; ++j) {
+            if (comp_g.a[j] >> 32 != gid) {
+                comp_g.a[k++] = comp_g.a[j];
+                gid = comp_g.a[j] >> 32;
+            }
+        }
+        comp_g.n = comp_g.m = k;
+        MYREALLOC(comp_g.a, k);
 
-        asmg_destroy(g);
+        // add og_component
+        kv_pushp(og_component_t, *component_v, &component);
+        component->type = (uint32_t) og_t;
+        component->score = a_s[imax];
+        component->sscore = a_s[smax];
+        component->len = len;
+        component->nv = nv;
+        component->v = comp_v;
+        component->ng = comp_g.n;
+        component->g = comp_g.a;
+        component->asmg = g;
 
         if (verbose > 0)
             fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %d; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
@@ -2864,15 +3359,718 @@ og_component_v *annot_seq_og_type1(hmm_annot_v *annot_v, asg_t *asg, int no_trn,
         *_annot_score = annot_score;
     else
         free(annot_score);
+    free(ann_snameid_map);
 
-    fix_og_misclassification(component_v);
+    fix_og_misclassification(component_v, verbose);
 
     qsort(component_v->a, component_v->n, sizeof(og_component_t), og_cmpfunc_r);
 
     return component_v;
 }
 
-void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components, FILE *fo)
+typedef struct {
+    int index;
+    double val;
+    int size;
+    int clust;
+} clust_dp_t;
+
+typedef struct {
+    int clust;
+    int n_dps;
+    int *dps;
+    int size;
+    double mean;
+    double og_score[4];
+    OG_TYPE_t og_type;
+} clust_t;
+
+static int dpVal_cmpfunc(const void *a, const void *b)
+{
+    double x, y;
+    x = ((clust_dp_t *) a)->val;
+    y = ((clust_dp_t *) b)->val;
+    return (x > y) - (x < y);
+}
+
+static int dpIdx_cmpfunc(const void *a, const void *b)
+{
+    int x, y;
+    x = ((clust_dp_t *) a)->index;
+    y = ((clust_dp_t *) b)->index;
+    return (x > y) - (x < y);
+}
+
+#define DBSCAN_EPS 0.25
+#define CLUSTV_EPS 0.50
+
+static int dbscan_cluster(clust_dp_t *dps, int n_dps, double eps, double v_eps)
+{
+    if (n_dps <= 0) return 0;
+    
+    qsort(dps, n_dps, sizeof(clust_dp_t), dpVal_cmpfunc);
+    
+    int i, n;
+    double vals;
+    dps[0].clust = 0;
+    vals = dps[0].val;
+    n = 1;
+    for (i = 1; i < n_dps; ++i) {
+        if (dps[i].val <= dps[i-1].val * (1 + eps) &&
+                dps[i].val <= vals / n * (1 + v_eps)) {
+            dps[i].clust = dps[i-1].clust;
+            vals += dps[i].val;
+            n += 1;
+        } else {
+            dps[i].clust = dps[i-1].clust + 1;
+            vals = dps[i].val;
+            n = 1;
+        }
+    }
+    
+    int n_clust = dps[n_dps-1].clust + 1;
+    
+    qsort(dps, n_dps, sizeof(clust_dp_t), dpIdx_cmpfunc);
+
+    return n_clust;
+}
+
+static clust_t *make_cluster(clust_dp_t *dps, int n_dps, int n_clust, int min_len)
+{
+    int i, c;
+    clust_t *clusts;
+    
+    MYCALLOC(clusts, n_clust);
+    // get dps number for each cluster
+    for (i = 0; i < n_dps; ++i)
+        ++clusts[dps[i].clust].n_dps;
+    for (i = 0; i < n_clust; ++i) {
+        clusts[i].clust = i;
+        MYMALLOC(clusts[i].dps, clusts[i].n_dps);
+        clusts[i].n_dps = 0;
+    }
+    for (i = 0; i < n_dps; ++i) {
+        c = dps[i].clust;
+        clusts[c].dps[clusts[c].n_dps] = dps[i].index;
+        clusts[c].mean += dps[i].val;
+        clusts[c].size += dps[i].size;
+        clusts[c].n_dps++;
+    }
+    for (i = 0; i < n_clust; ++i)
+        clusts[i].mean /= clusts[i].n_dps;
+    
+    /***
+    // for each cluster determine if is a major or minor cluster
+    // major cluster tends to be low-copy sequences
+    // minor cluster is allowed to have higher copy numbers
+    // decision made mainly based on the sequence size
+    // if the cluster size is smaller than than 10% of the total size
+    // and all sequences in the cluster is smaller than min_len
+    // mark major cluster using the last bit of 'clust'
+    // TODO estiamte size proportion (10%) with sequences of similar coverage
+    int j;
+    double size = 0.;
+    for (i = 0; i < n_clust; ++i)
+        size += clusts[i].size;
+    size *= 0.1;
+    for (i = 0; i < n_clust; ++i) {
+        clusts[i].clust <<= 1;
+        c = 0; // mark minor cluster
+        if (clusts[i].size >= size) {
+            c = 1; // mark major cluster
+        } else {
+            for (j = 0; j < clusts[i].n_dps; ++j) {
+                if (dps[clusts[i].dps[j]].size >= min_len) {
+                    c = 1; // mark major cluster
+                    break;    
+                }
+            }
+        }
+        clusts[i].clust |= c;
+    }
+    **/
+
+    return clusts;
+}
+
+#define LOG1_5 0.405465108108
+#define LOG2_5 0.916290731874
+#define LOG3_5 1.252762968495
+#define LOG4_5 1.504077396776
+
+KDQ_INIT(uint64_t)
+
+typedef kdq_t(uint64_t) kdq_u64_t;
+
+static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *component_g, OG_TYPE_t og_target, 
+        OG_TYPE_t og_contam, clust_t *clusts, int n_clust, uint32_t *gene_num, double min_cov, double max_cov, 
+        int max_r_len, og_component_v *components, int verbose)
+{
+    uint32_t i, j, k, l, v, w, r, nv, na, len, gen, cov, gid, n_vtx, imax, smax, *comp_v;
+    uint8_t *dels, *visited, *clust_v;
+    double c_mean, score[4];
+    asmg_t *asmg;
+    asmg_arc_t *av;
+    og_component_t *component_s, *component;
+
+    asmg = asg_make_asmg_copy(component_g->asmg, 0);
+    n_vtx = asmg->n_vtx;
+    comp_v = component_g->v;
+    nv = component_g->nv;
+
+    c_mean = min_cov;
+    min_cov = MIN(c_mean, max_cov / 2.5);
+    max_cov = MAX(max_cov, c_mean * 2.5);
+    
+    // do graph slimming
+    if (verbose > 1)
+        fprintf(stderr, "[M::%s] subgraph slimming for organelle [%s] against [%s] with sequence coverage %.3f - %.3f\n", 
+                __func__, OG_TYPES[og_target], OG_TYPES[og_contam], min_cov, max_cov);
+    
+    // collect sequences in target cluster
+    MYCALLOC(clust_v, nv);
+    for (i = 0; i < n_clust; ++i) {
+        if (og_target != clusts[i].og_type)
+            continue;
+        for (j = 0; j < clusts[i].n_dps; ++j)
+            clust_v[clusts[i].dps[j]] = 1;
+    }
+
+    // find sequences to remove
+    MYCALLOC(dels, n_vtx);
+    for (i = 0; i < n_clust; ++i) {
+        if (og_contam != OG_UNCLASSIFIED &&
+                og_contam == clusts[i].og_type) {
+            // this is a contamination cluster
+            for (j = 0; j < clusts[i].n_dps; ++j) {
+                v = clusts[i].dps[j];
+                dels[comp_v[v]] = 1;
+            } 
+        } else if (og_target != clusts[i].og_type) {
+            // this is a unclassified cluster
+            for (j = 0; j < clusts[i].n_dps; ++j) {
+                v = clusts[i].dps[j];
+                len = asmg->vtx[comp_v[v]].len;
+                cov = asmg->vtx[comp_v[v]].cov;
+                if (cov < min_cov || cov > max_cov)
+                    dels[comp_v[v]] = 1;
+            }
+        }
+    }
+
+    // bring back the sequence if in a critical path
+    // TODO improve the recalling strategy
+    // currently bring repeat sequences back if attached to any non-deleted
+    /***
+    while (1) {
+        int recall = 0;
+        for (i = 0; i < nv; ++i) {
+            v = comp_v[i];
+            if (!dels[v] || asmg->vtx[v].len > max_r_len)
+                continue; // not a repeat
+            // check incoming and outgoing arcs to see if any non-deleted
+            int done = 0;
+            for (j = 0; j < 2 && !done; ++j) {
+                av = asmg_arc_a(asmg, v<<1 | j);
+                na = asmg_arc_n(asmg, v<<1 | j);
+                for (k = 0; k < na; ++k) {
+                    if (!av[k].del && !dels[av[k].w>>1]) {
+                        dels[v] = 0;
+                        ++recall;
+                        done = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!recall) break;
+    }
+    **/
+    
+    // here is an improved strategy
+    // bring a repeat sequence back if both ends connect to a non-deleted non-repeat
+    // through a path of all repeats
+    // and the distance is no greater than max_r_len
+    int *dist, *flag;
+    kdq_u64_t *q;
+
+    MYCALLOC(dist, n_vtx << 1);
+    MYMALLOC(flag, n_vtx << 1);
+    q = kdq_init(uint64_t, 0);
+    for (i = 0; i < nv; ++i) {
+        if (dels[comp_v[i]] ||
+                asmg->vtx[comp_v[i]].len <= max_r_len)
+            // skip dels and short sequences/repeats
+            continue;
+        for (k = 0; k < 2; ++k) {
+            uint64_t source = comp_v[i] << 1 | k;
+            // find all reachable repeats from 'source'
+            MYBZERO(flag, n_vtx << 1);
+            kdq_push(uint64_t, q, source << 32 | 0);
+            while (kdq_size(q) > 0) {
+                uint64_t x = *kdq_shift(uint64_t, q);
+                v = x >> 32;
+                r = (uint32_t) x;
+                flag[v] = 1;
+                dist[v] = source << 1 | 1;
+                av = asmg_arc_a(asmg, v);
+                na = asmg_arc_n(asmg, v);
+                for (j = 0; j < na; ++j) {
+                    if (av[j].del)
+                        continue;
+                    w = av[j].w;
+                    if (!flag[w] && 
+                            r <= av[j].ls + max_r_len && 
+                            asmg->vtx[w>>1].len <= max_r_len)
+                        // add non-visited repeats
+                        kdq_push(uint64_t, q, (uint64_t) w << 32 | (r + asmg->vtx[w>>1].len - av[j].ls));
+                }
+            }
+        }
+    }
+    for (i = 0; i < nv; ++i) {
+        v = comp_v[i];
+        if (dels[v] && 
+                asmg->vtx[v].len <= max_r_len &&
+                dist[v<<1] &&
+                dist[v<<1 | 1]) {
+            dels[v] = 0;
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] recall repeat %s: %s%c <-> %s%c\n", __func__, 
+                        asg->seg[v].name,
+                        asg->seg[dist[v<<1]>>2].name, "+-"[(dist[v<<1]>>1)&1], 
+                        asg->seg[dist[v<<1|1]>>2].name, "+-"[(dist[v<<1|1]>>1)&1]);
+        }
+    }
+    free(dist);
+    free(flag);
+    kdq_destroy(uint64_t, q);
+
+    for (i = 0; i < nv; ++i) {
+        v = comp_v[i];
+        if (dels[v])
+            asmg_vtx_del(asmg, v, 1);
+    }
+
+    uint64_t cleaned = 1;
+    while (cleaned) {
+        // simple clean
+        cleaned = 0;
+        cleaned += asmg_pop_bubble(asmg, max_r_len, 0, 0, 1, 0, verbose);
+        cleaned += asmg_remove_weak_crosslink(asmg, 0.3, 10, 0, verbose);
+        cleaned += asmg_drop_tip(asmg, INT_MAX, max_r_len, 1, 0, verbose);
+    }
+    // add cleaned vtx to dels for integrity
+    for (i = 0; i < nv; ++i) {
+        v = comp_v[i];
+        if (asmg->vtx[v].del)
+            dels[v] = 1;
+    }
+
+    if (verbose > 2) {
+        asmg_t *g = asg->asmg;
+        asg->asmg = asmg;
+        asg_print(asg, stderr, 1);
+        asg->asmg = g;
+    }
+
+    // minimum subgraph size to keep
+    // set as 10% of the total sequence
+    double m_size = 0;
+    for (i = 0; i < nv; ++i) {
+        v = comp_v[i];
+        if (!asmg->vtx[v].del)
+            m_size += asmg->vtx[v].len;
+    }
+    m_size *= 0.1;
+
+    // now process each subgraph
+    MYCALLOC(visited, n_vtx);
+    for (i = 0; i < nv; ++i) {
+        v = comp_v[i];
+        if (visited[v] || asmg->vtx[v].del)
+            continue;
+        
+        asmg_t *g = asg_make_asmg_copy(asmg, 0);
+        asmg_subgraph(g, &v, 1, 0, 0, 0, 1);
+
+        kvec_t(uint32_t) comp_s;
+        kv_init(comp_s);
+        len = gen = 0;
+        for (j = 0; j < nv; ++j) {
+            w = comp_v[j];
+            if (g->vtx[w].del)
+                continue;
+            kv_push(uint32_t, comp_s, w);
+            len += g->vtx[w].len;
+            gen += gene_num[nv * og_target + j];
+            visited[w] = 1;
+        }
+        if (len < m_size || gen == 0) {
+            // not a good subgraph
+            asmg_destroy(g);
+            kv_destroy(comp_s);
+            continue;
+        }
+        
+        // add subgraph component
+        // adjust repeat sequence coverage if necessary
+        // also fix the arc coverage
+        for (j = 0; j < nv; ++j) {
+            w = comp_v[j];
+            if (g->vtx[w].del ||
+                    clust_v[j] ||
+                    g->vtx[w].len >= max_r_len ||
+                    g->vtx[w].cov < c_mean * 3.5)
+                continue;
+            int n_del, n_arc;
+            n_del = n_arc = 0;
+            for (k = 0; k < 2; ++k) {
+                av = asmg_arc_a(asmg, w << 1 | k);
+                na = asmg_arc_n(asmg, w << 1 | k);
+                for (l = 0; l < na; ++l) {
+                    if (dels[av[l].w>>1])
+                        ++n_del;
+                    if (!av[l].del)
+                        ++n_arc;
+                }
+            }
+            if (!n_del) continue;
+            cov = g->vtx[w].cov;
+            g->vtx[w].cov = c_mean * n_arc / 2.0;
+            // fix arc coverage
+            for (k = 0; k < 2; ++k) {
+                av = asmg_arc_a(asmg, w << 1 | k);
+                na = asmg_arc_n(asmg, w << 1 | k);
+                for (l = 0; l < na; ++l) {
+                    if (av[l].del) continue;
+                    if (av[l].cov > cov)
+                        av[l].cov = cov;
+                }
+            }
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] sequence %s coverage adjusted: %u -> %u\n", 
+                        __func__, asg->seg[w].name, cov, g->vtx[w].cov);
+        }
+
+        // make seg list
+        MYREALLOC(comp_s.a, comp_s.n);
+
+        // make gene list
+        kvec_t(uint64_t) comp_g;
+        kv_init(comp_g);
+        // collect genes from sequences in the subgraph
+        for (j = 0; j < nv; ++j) {
+            w = comp_v[j];
+            if (g->vtx[w].del)
+                continue;
+            component_s = &sequence_og->a[w];
+            kv_pushn(uint64_t, comp_g, component_s->g, component_s->ng);
+        }
+        // sort by gid and then score - descending order
+        qsort(comp_g.a, comp_g.n, sizeof(uint64_t), u64_cmpfunc_r);
+        // keep only the best hit for each gene
+        k = 0;
+        gid = UINT32_MAX;
+        for (j = 0; j < comp_g.n; ++j) {
+            if (comp_g.a[j] >> 32 != gid) {
+                comp_g.a[k++] = comp_g.a[j];
+                gid = comp_g.a[j] >> 32;
+            }
+        }
+        comp_g.n = k;
+        MYREALLOC(comp_g.a, k);
+
+        // calculate subgraph annotation scores
+        uint64_t *a_s = comp_g.a;
+        MYBZERO(score, 4);
+        for (j = 0, k = comp_g.n; j < k; ++j)
+            score[(a_s[j] >> 32) & 0x3] += (uint32_t) a_s[j];
+        imax = max2(score, 4, &smax);
+
+        // update component vector
+        kv_pushp(og_component_t, *components, &component);
+        component->type = (uint32_t) og_target;
+        component->score = score[imax];
+        component->sscore = score[smax];
+        component->len = len;
+        component->nv = comp_s.n;
+        component->v = comp_s.a;
+        component->ng = comp_g.n;
+        component->g = comp_g.a;
+        component->asmg = g;
+
+        if (verbose > 0)
+            fprintf(stderr, "[M::%s] subgraph seeding from %s: segs, %lu; size, %d; mito score, %.3f; pltd score, %.3f; mini score, %.3f; classification, %d\n",
+                    __func__, asg->seg[v].name, comp_s.n, len, score[OG_MITO], score[OG_PLTD], score[OG_MINI], og_target);
+
+    }
+
+    free(dels);
+    free(visited);
+    free(clust_v);
+    asmg_destroy(asmg);
+}
+
+// this is a improved version of annot_subgraph_og_type
+// to deal with graphs with contamination sequences
+// e.g., pltd-mito mixtures
+// e.g., graphs with sequence groups of abnormal coverage
+// the core idea is to
+// make sequence clusters based on coverage as implemented in dbscan_cluster
+// and then clean graph based on sequence clusters as implemented in slim_graph
+og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
+        int n_core, int min_len, int min_score, int fix_og, int verbose)
+{
+    uint32_t i, j, k, n, m, c, v, nv, gid, imax, smax, score, n_seg, n_gene, m_gene, n_clust, seed, l_seeds[4], n_seeds[4], *comp_v, *gene_num, *seed_clust;
+    uint64_t *gene_score, *gene_clust;
+    double *a_s, *annot_score, *seg_score, c_mean, min_mean[4], max_mean[4];
+    OG_TYPE_t og_t, *og_seeds;
+    og_component_t *component_s, *component_g;
+    og_component_v *sequence_og, *subgraph_og, *component_v;
+    clust_dp_t *comp_dps;
+    clust_t *clusts;
+    
+    n_gene = annot_db->n;
+    n_seg = asg->n_seg;
+
+    if (n_gene == 0) return 0;
+    
+    m_gene = annot_db->n_gene;
+
+    seg_score = get_sequence_annot_score(annot_db, asg, no_trn, no_rrn, max_eval, 0, verbose);
+    sequence_og = annot_sequence_og_type(annot_db, asg, no_trn, no_rrn, max_eval, n_core, min_len, min_score, 0, verbose);
+    subgraph_og = annot_subgraph_og_type(annot_db, asg, no_trn, no_rrn, max_eval, n_core, min_len, min_score, 0, verbose);
+
+    MYCALLOC(annot_score, m_gene * 4);
+    // collect best annotation score for each gene across the entire graph
+    for (i = 0; i < n_seg; ++i) {
+        component_s = &sequence_og->a[i];
+        gene_score = component_s->g;
+        for (j = 0; j < component_s->ng; ++j) {
+            gid = gene_score[j] >> 34;
+            og_t = (gene_score[j] >> 32) & 0x3;
+            score = (uint32_t) gene_score[j];
+            
+            gid += m_gene * og_t;
+            if (annot_score[gid] < (double) score)
+                annot_score[gid] = score;
+        }
+    }
+    
+    // check if each subgraph is a mito-pltd mixture
+    // separate organelle genomes for mixtures
+    double g_diff[4] = {0.9, 0.8, 0.9, 0.9}; // relaxation for gene socres
+    MYCALLOC(component_v, 1);
+    for (i = 0; i < subgraph_og->n; ++i) {
+        component_g = &subgraph_og->a[i];
+        comp_v = component_g->v;
+        nv = component_g->nv;
+
+        // count genes with best annotation scores
+        MYCALLOC(gene_num, nv * 4);
+        for (j = 0; j < nv; ++j) {
+            component_s = &sequence_og->a[comp_v[j]];
+            og_t = component_s->type;
+            
+            a_s = &annot_score[m_gene * og_t];
+            gene_score = component_s->g;
+            // count genes with best annotation scores
+            n = 0;
+            for (k = 0; k < component_s->ng; ++k) {
+                if (((gene_score[k] >> 32) & 0x3) != og_t)
+                    continue;
+                gid = gene_score[k] >> 34;
+                score = (uint32_t) gene_score[k];
+                if ((double) score >= a_s[gid] * g_diff[og_t])
+                    ++n;
+            }
+            // the number of best genes
+            gene_num[nv * og_t + j] = n;
+        }
+        
+        // do clustering by sequence overage
+        MYMALLOC(comp_dps, nv);
+        for (j = 0; j < nv; ++j) {
+            comp_dps[j].index = j;
+            comp_dps[j].val = component_g->asmg->vtx[comp_v[j]].cov;
+            comp_dps[j].size = component_g->asmg->vtx[comp_v[j]].len;
+            comp_dps[j].clust = -1;
+        }
+        n_clust = dbscan_cluster(comp_dps, nv, DBSCAN_EPS, CLUSTV_EPS);
+        clusts = make_cluster(comp_dps, nv, n_clust, min_len);
+
+        // organelle type classification for each coverage cluster
+        for (j = 0; j < n_clust; ++j) {
+            a_s = clusts[j].og_score;
+            MYBZERO(a_s, 4);
+            for (m = 0, n = clusts[j].n_dps; m < n; ++m) {
+                v = comp_v[clusts[j].dps[m]];
+                for (k = 0; k < 4; ++k)
+                    a_s[k] += seg_score[v * 4 + k];
+            }
+            imax = max2(a_s, 4, &smax);
+            clusts[j].og_type = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
+        }
+
+        if (verbose > 2) {
+            fprintf(stderr, "[M::%s] subgraph sequence coverage clustering [CLUST=%d]:\n", __func__, n_clust);
+            for (j = 0; j < n_clust; ++j) {
+                a_s = clusts[j].og_score;
+                fprintf(stderr, "[M::%s] CLUST=%d OG=%s [M=%.3f N=%d L=%d] [MITO=%.3f PLTD=%.3f MINI=%.3f]\n", 
+                        __func__, j, OG_TYPES[clusts[j].og_type], clusts[j].mean, clusts[j].n_dps, clusts[j].size, 
+                        a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI]);
+            }
+            fprintf(stderr, "[M::%s] subgraph sequence [NV=%d]:\n", __func__, nv);
+            qsort(comp_dps, nv, sizeof(clust_dp_t), dpVal_cmpfunc);
+            for (j = 0; j < nv; ++j) {
+                v = comp_dps[j].index;
+                og_t = sequence_og->a[comp_v[v]].type;
+                fprintf(stderr, "[M::%s] %s [%s #MG=%d #PG=%d] COV=%.3f LEN=%d CLUST=%d\n", __func__,
+                        asg->seg[comp_v[v]].name, OG_TYPES[og_t], gene_num[nv * OG_MITO + v], gene_num[nv * OG_PLTD + v], 
+                        comp_dps[j].val, comp_dps[j].size, comp_dps[j].clust);
+            }
+            qsort(comp_dps, nv, sizeof(clust_dp_t), dpIdx_cmpfunc);
+        }
+
+        // check each sequence in the subgraph
+        // to find seeding sequences for each organelle type
+        MYMALLOC(gene_clust, n_clust);
+        MYCALLOC(seed_clust, n_clust);
+        MYCALLOC(og_seeds, nv);
+        MYBZERO(l_seeds, 4);
+        MYBZERO(n_seeds, 4);
+        MYBZERO(min_mean, 4);
+        MYBZERO(max_mean, 4);
+        for (j = 0; j < 4; ++j) {
+            // shift to the corresponding organelle type
+            gene_num += nv * j;
+            // count number of best genes in each coverage cluster
+            MYBZERO(gene_clust, n_clust);
+            for (k = 0; k < nv; ++k)
+                gene_clust[comp_dps[k].clust] += gene_num[k];
+            for (k = 0; k < n_clust; ++k) {
+                gene_clust[k] <<= 32;
+                gene_clust[k] |= k;
+            }
+            // sort clusters by number of best genes in descending order
+            qsort(gene_clust, n_clust, sizeof(uint64_t), u64_cmpfunc_r);
+            // collect seeds in each cluster
+            for (k = 0; k < n_clust; ++k) {
+                if ((gene_clust[k] >> 32) == 0)
+                    break;
+                n = gene_clust[k] >> 32;
+                c = (uint32_t) gene_clust[k]; // cluster index
+                if (clusts[c].og_type != j)
+                    continue;
+                seed = 0;
+                // major cluster
+                c_mean = clusts[c].mean;
+                if (min_mean[j] == 0) {
+                    // mean coverage not set yet
+                    seed = 1;
+                    min_mean[j] = c_mean;
+                    max_mean[j] = c_mean;
+                } else if (fabs(log(min_mean[j]/c_mean)) < LOG4_5 &&
+                        fabs(log(max_mean[j]/c_mean)) < LOG4_5 &&
+                        n >= 3) {
+                    // mean coverage is within 4.5-fold difference
+                    // for secondary clusters require at least 3 genes
+                    seed = 1;
+                    if (c_mean < min_mean[j]) min_mean[j] = c_mean;
+                    if (c_mean > max_mean[j]) max_mean[j] = c_mean;
+                }
+                //if (!(clusts[c].clust & 1)) // minor cluster
+                //    seed = 1;
+                if (!seed) continue;
+                for (m = 0, n = clusts[c].n_dps; m < n; ++m) {
+                    v = clusts[c].dps[m];
+                    og_t = sequence_og->a[comp_v[v]].type;
+                    if (gene_num[v] > 0 && og_t == j)
+                        og_seeds[v] = og_t;
+                }
+                seed_clust[c] = j;
+            }
+            // shift back to the beginning
+            gene_num -= nv * j;
+        }
+        
+        // collect seeds
+        for (j = 0; j < nv; ++j) {
+            og_t = og_seeds[j];
+            if (og_t == OG_UNCLASSIFIED)
+                continue;
+            n_seeds[og_t] += 1;
+            l_seeds[og_t] += comp_dps[j].size;
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] [%s] organelle seed with %u genes: %s\n", __func__, 
+                        OG_TYPES[og_t], gene_num[nv * og_t + j], asg->seg[comp_v[j]].name);
+        }
+        
+        if (l_seeds[OG_MITO] > 0 && l_seeds[OG_PLTD] > 0) {
+            // filter out small seed clusters for mito-pltd mixtures
+            for (j = 0; j < 4; ++j) {
+                if (l_seeds[j] == 0 || l_seeds[j] >= min_len)
+                    continue;
+                for (k = 0; k < n_clust; ++k)
+                    if (seed_clust[k] == j)
+                        seed_clust[k] = OG_UNCLASSIFIED;
+                for (k = 0; k < nv; ++k)
+                    if (og_seeds[k] == j)
+                        og_seeds[k] = OG_UNCLASSIFIED;
+                if (verbose > 2) fprintf(stderr, "[M::%s] small [%s] organelle seed cluster filtered out: NS=%u LS=%u\n", __func__, 
+                        OG_TYPES[j], n_seeds[j], l_seeds[j]);
+                n_seeds[j] = 0;
+                l_seeds[j] = 0;
+            }
+        }
+        
+        // reassign cluster organelle type
+        for (j = 0; j < n_clust; ++j)
+            clusts[j].og_type = seed_clust[j];
+
+        if (verbose > 1) {
+            fprintf(stderr, "[M::%s] subgraph organelle seeds summary: \n", __func__);
+            for (k = 0; k < 4; ++k)
+                fprintf(stderr, "[M::%s] [%s] - seeds number: %u; seeds length: %u; seeds coverage: %.3f - %.3f\n", __func__,
+                        OG_TYPES[k], n_seeds[k], l_seeds[k], min_mean[k], max_mean[k]);
+        }
+        
+        // process each organelle type
+        // for graph slimming
+        if (l_seeds[OG_MITO] > 0)
+            slim_graph(asg, sequence_og, component_g, OG_MITO, OG_PLTD, clusts, n_clust, gene_num, 
+                    min_mean[OG_MITO], max_mean[OG_MITO], min_len, component_v, verbose);
+        if (l_seeds[OG_PLTD] > 0)
+            slim_graph(asg, sequence_og, component_g, OG_PLTD, OG_MITO, clusts, n_clust, gene_num, 
+                    min_mean[OG_PLTD], max_mean[OG_PLTD], min_len, component_v, verbose);
+        if (l_seeds[OG_MINI] > 0)
+            slim_graph(asg, sequence_og, component_g, OG_MINI, OG_UNCLASSIFIED, clusts, n_clust, gene_num, 
+                    min_mean[OG_MINI], max_mean[OG_MINI], min_len, component_v, verbose);
+        
+        free(og_seeds);
+        free(gene_num);
+        free(comp_dps);
+        free(gene_clust);
+        free(seed_clust);
+        for (j = 0; j < n_clust; ++j)
+            free(clusts[j].dps);
+        free(clusts);
+    }
+    
+    free(seg_score);
+    free(annot_score);
+    og_component_v_destroy(sequence_og);
+    og_component_v_destroy(subgraph_og);
+
+    if (fix_og) fix_og_misclassification(component_v, verbose);
+    
+    qsort(component_v->a, component_v->n, sizeof(og_component_t), og_cmpfunc_r);
+
+    return component_v;
+}
+
+void print_og_classification_summary(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components, FILE *fo)
 {
     if (!og_components) return;
     uint32_t i, j;
@@ -2892,7 +4090,24 @@ void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_compon
         fprintf(fo, "[M::%s] OG component %u og_ng: %u\n", __func__, i, component->ng);
         for (j = 0; j < component->ng; ++j)
             fprintf(fo, "[M::%s] OG component %u og_g: %s %u\n", __func__, i,
-                    annot_v->dict[component->g[j]>>34], (uint32_t) component->g[j]);
+                    annot_db->gnames[component->g[j]>>34], (uint32_t) component->g[j]);
     }
 }
+
+char **asg_vtx_name_list(asg_t *g, uint64_t *_n)
+{
+    if (_n) *_n = 0;
+    uint64_t i, n = 0;
+    uint64_t *vlist = asmg_vtx_list(g->asmg, &n);
+    char **names = 0;
+    if (n) {
+        MYMALLOC(names, n);
+        for (i = 0; i < n; ++i)
+            names[i] = g->seg[vlist[i]].name;
+    }
+    free(vlist);
+    if (_n) *_n = n;
+    return names;
+}
+
 

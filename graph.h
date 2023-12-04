@@ -39,9 +39,10 @@
 typedef struct {
     uint64_t v; // node id << 1 | rev
     uint64_t w; // node id << 1 | rev
-    uint64_t lo; // v->w overlap length: syncmer number or sequence length
-    uint64_t link_id; // arc and comp share the same link_id
+    uint64_t ln; // v->w overlapping syncmer number
+    uint64_t ls; // v->w overlapping consensus sequence length
     uint32_t cov:30, del:1, comp:1; // arc coverage, deleted, reverse complement
+    uint64_t link_id; // arc and comp share the same link_id
 } asmg_arc_t;
 
 typedef struct {
@@ -79,12 +80,16 @@ int asmg_arc_is_sorted(asmg_t *g);
 uint64_t asmg_max_link_id(asmg_t *g);
 void asmg_shrink_link_id(asmg_t *g);
 void asmg_finalize(asmg_t *g, int do_cleanup);
+void asmg_arc_fix_cov(asmg_t *g);
+uint64_t *asmg_vtx_list(asmg_t *g, uint64_t *_n);
+void asmg_print(asmg_t *g, FILE *fo, int no_seq);
 uint32_t *asmg_uext_arc_group(asmg_t *g, uint32_t *n);
 asmg_t *asmg_unitigging(asmg_t *g);
-uint64_t asmg_drop_tip(asmg_t *g, int32_t tip_cnt, uint64_t tip_len, int do_cleanup, int VERBOSE);
+uint64_t asmg_drop_tip(asmg_t *g, int32_t tip_cnt, uint64_t tip_len, int protect_super_tip, int do_cleanup, int VERBOSE);
 uint64_t asmg_pop_bubble(asmg_t *g, uint64_t radius, uint64_t max_del, int protect_tip, int protect_super_bubble, int do_cleanup, int VERBOSE);
-uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, int VERBOSE);
+uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, double m_cov, int do_cleanup, int VERBOSE);
 uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, uint64_t dist, uint32_t *_nv, int modify_graph);
+int asmg_tarjans_scc(asmg_t *g, int *scc);
 int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, uint64_t dist, uint32_t *_step, uint64_t *_dist);
 #ifdef __cplusplus
 }
@@ -237,7 +242,7 @@ static inline int asmg_arc_exist1(asmg_t *g, uint64_t v, uint64_t w)
     return 0;
 }
 
-static inline asmg_arc_t *asmg_arc_add(asmg_t *g, uint64_t v, uint64_t w, uint64_t lo, uint64_t link_id, uint32_t cov, uint32_t comp)
+static inline asmg_arc_t *asmg_arc_add(asmg_t *g, uint64_t v, uint64_t w, uint64_t ln, uint64_t ls, uint64_t link_id, uint32_t cov, uint32_t comp)
 {
     asmg_arc_t *a;
     if (g->n_arc == g->m_arc)
@@ -245,7 +250,8 @@ static inline asmg_arc_t *asmg_arc_add(asmg_t *g, uint64_t v, uint64_t w, uint64
     a = &g->arc[g->n_arc++];
     a->v = v;
     a->w = w;
-    a->lo = lo;
+    a->ln = ln;
+    a->ls = ls;
     a->link_id = link_id;
     a->cov = cov;
     a->del = 0;
@@ -253,12 +259,12 @@ static inline asmg_arc_t *asmg_arc_add(asmg_t *g, uint64_t v, uint64_t w, uint64
     return a;
 }
 
-static inline void asmg_arc_add2(asmg_t *g, uint64_t v, uint64_t w, uint64_t lo, uint64_t link_id, uint32_t cov, uint32_t comp)
+static inline void asmg_arc_add2(asmg_t *g, uint64_t v, uint64_t w, uint64_t ln, uint64_t ls, uint64_t link_id, uint32_t cov, uint32_t comp)
 {
     // add both arc and its comp
-    asmg_arc_add(g, v, w, lo, link_id, cov, comp);
+    asmg_arc_add(g, v, w, ln, ls, link_id, cov, comp);
     if (v != (w^1) || w != (v^1))
-        asmg_arc_add(g, w^1, v^1, lo, link_id, cov, comp^1);
+        asmg_arc_add(g, w^1, v^1, ln, ls, link_id, cov, comp^1);
 }
 
 static inline uint64_t asmg_comp_arc_id(asmg_arc_t *a)
@@ -278,7 +284,7 @@ static inline void asmg_clean_consensus(asmg_t *g)
 {
     uint64_t i, n;
     for (i = 0, n = g->n_arc; i < n; ++i)
-        g->arc[i].lo = 0;
+        g->arc[i].ls = 0;
     for (i = 0, n = g->n_vtx; i < n; ++i) {
         if (g->vtx[i].seq) {
             free(g->vtx[i].seq);

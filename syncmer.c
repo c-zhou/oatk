@@ -29,18 +29,20 @@
  *********************************************************************************/
 #include <stdio.h>
 #include <assert.h>
-#include <pthread.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "misc.h"
 #include "khashl.h"
 #include "kvec.h"
 #include "syncmer.h"
-#include "MurmurHash3.h"
 
 #undef DEBUG_KMER_EXTRACTION
 #undef DEBUG_S_KMER_GROUP
 #undef DEBUG_LINK_COVERAGE
+#undef DEBUG_CHECK_HASH_COLLISION
+
+#define DO_HOCO_COMPRESSION
 
 const unsigned char seq_nt4_table[256] = {
     0, 1, 2, 3,  4, 4, 4, 4,  4, 4, 4, 4,  4, 4, 4, 4,
@@ -68,8 +70,8 @@ const char seq_nt4_comp_table[128] = {
     48,  49,  50,  51,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  62,  63,
     64, 'T', 'V', 'G', 'H', 'E', 'F', 'C', 'D', 'I', 'J', 'M', 'L', 'K', 'N', 'O',
     'P', 'Q', 'Y', 'S', 'A', 'A', 'B', 'W', 'X', 'R', 'Z',  91,  92,  93,  94,  95,
-    64, 't', 'v', 'g', 'h', 'e', 'f', 'c', 'd', 'i', 'j', 'm', 'l', 'k', 'n', 'o',
-    'p', 'q', 'y', 's', 'a', 'a', 'b', 'w', 'x', 'r', 'z', 123, 124, 125, 126, 127
+    64, 'T', 'V', 'G', 'H', 'E', 'F', 'C', 'D', 'I', 'J', 'M', 'L', 'K', 'N', 'O',
+    'P', 'Q', 'Y', 'S', 'A', 'A', 'B', 'W', 'X', 'R', 'Z', 123, 124, 125, 126, 127
 };
 
 const char char_nt4_table[4] = {'A', 'C', 'G', 'T'};
@@ -123,16 +125,57 @@ static inline uint64_t hash64(uint64_t key, uint64_t mask)
     return key;
 }
 
-static uint32_t murmur3_seed = 1234;
 static uint8_t lmask[4] = {255, 192, 240, 252};
+static uint64_t murmur3_seed = 1234;
+
+uint64_t MurmurHash64A(const void *key, uint32_t len, uint64_t seed)
+{
+    const uint64_t m = 0xc6a4a7935bd1e995LLU;
+    const int r = 47;
+
+    uint64_t h = seed ^ (len * m);
+
+    const uint64_t *data = (const uint64_t *)key;
+    const uint64_t *end = (len >> 3) + data;
+
+    while(data != end) {
+        uint64_t k = *data++;
+
+        k *= m;
+        k ^= k >> r;
+        k *= m;
+
+        h ^= k;
+        h *= m;
+    }
+
+    const unsigned char *data2 = (const unsigned char *) data;
+
+    switch(len & 7) {
+        case 7: h ^= (uint64_t) (data2[6]) << 48;
+        case 6: h ^= (uint64_t) (data2[5]) << 40;
+        case 5: h ^= (uint64_t) (data2[4]) << 32;
+        case 4: h ^= (uint64_t) (data2[3]) << 24;
+        case 3: h ^= (uint64_t) (data2[2]) << 16;
+        case 2: h ^= (uint64_t) (data2[1]) << 8;
+        case 1: h ^= (uint64_t) (data2[0]);
+                h *= m;
+    };
+
+    h ^= h >> r;
+    h *= m;
+    h ^= h >> r;
+
+    return h;
+}
 
 #ifdef DEBUG_KMER_EXTRACTION
-static uint128_t hash128(uint64_t sid, uint8_t *s, uint32_t p, int w)
+static uint64_t kmer_hash64(uint64_t sid, uint8_t *s, uint32_t p, int w)
 #else
-static uint128_t hash128(uint8_t *s, uint32_t p, int w)
+static uint64_t kmer_hash64(uint8_t *s, uint32_t p, int w)
 #endif
 {
-    uint128_t h128;
+    uint64_t h64;
     uint8_t *key;
     int i, j, rev, res, p0, p1, b, c;
 
@@ -167,8 +210,7 @@ static uint128_t hash128(uint8_t *s, uint32_t p, int w)
     // mask the lower bits
     key[b-1] &= lmask[w&3];
 
-    // murmur3 hashing
-    MurmurHash3_x64_128(key, (w - 1) / 4 + 1, murmur3_seed, &h128);
+    h64 = MurmurHash64A(key, (w - 1) / 4 + 1, murmur3_seed);
 
 #ifdef DEBUG_KMER_EXTRACTION
     fprintf(stderr, "[DEBUG_KMER_EXTRACTION::%s] sid:%lu p0:%d p1:%d rev:%d ", __func__, sid, p0, p1, rev);
@@ -181,7 +223,7 @@ static uint128_t hash128(uint8_t *s, uint32_t p, int w)
 
     free(key);
     
-    return h128;
+    return h64;
 }
 
 typedef struct {
@@ -190,8 +232,7 @@ typedef struct {
     char **name;
     char **seq;
     int *len;
-    int k, w;
-    sr_v sr;
+    sr_db_t *sr_db;
 } p_data_t;
 
 static inline int q_next(int i, int q)
@@ -206,7 +247,7 @@ static void *sr_read_analysis_thread(void *args)
     
     int len, k, w; 
     char *seq;
-    k = dat->k, w = dat->w;
+    k = dat->sr_db->s, w = dat->sr_db->k;
     assert(k > 0 && k < 32 && w > k);
 
     int r;
@@ -221,7 +262,7 @@ static void *sr_read_analysis_thread(void *args)
         kvec_t(uint8_t) hoco_s, ho_rl;
         kvec_t(uint32_t) ho_l_rl, n_nucl, m_pos;
         kvec_t(uint64_t) s_mer;
-        kvec_t(uint128_t) k_mer_h;
+        kvec_t(uint64_t) k_mer;
     
         kv_init(hoco_s);
         kv_init(ho_rl);
@@ -229,7 +270,7 @@ static void *sr_read_analysis_thread(void *args)
         kv_init(n_nucl);
         kv_init(m_pos);
         kv_init(s_mer);
-        kv_init(k_mer_h);
+        kv_init(k_mer);
 
         int q = w - k + 1; // buf q size
         uint64_t m, s, z, mz, shift1 = 2 * (k - 1), mask = (1ULL<<2*k) - 1, kmer[2] = {0, 0}, buf_m[q], buf_s[q];
@@ -246,15 +287,16 @@ static void *sr_read_analysis_thread(void *args)
             if (c < 4) { // not an ambiguous base
                 // hoco_s.a[hoco_s.n - 1] = hoco_s.a[hoco_s.n - 1] << 2 | c;
                 if (c) hoco_s.a[hoco_s.n - 1] |= c << ((((hoco_l-1)&3)^3)<<1); // 6 - ((hoco_l - 1) % 4) << 1;
-                // hpc
                 rl = 1;
+#ifdef DO_HOCO_COMPRESSION    
+                // hpc
                 if (i + 1 < len && seq_nt4_table[(uint8_t)seq[i + 1]] == c) {
                     for (rl = 2; i + rl < len; ++rl)
                         if (seq_nt4_table[(uint8_t)seq[i + rl]] != c)
                             break;
                     i += rl - 1; // put $i at the end of the current homopolymer run
                 }
-            
+#endif
                 if (rl > 255)
                     kv_push(uint32_t, ho_l_rl, rl - 1);
                 rl = MIN(rl, 256);
@@ -284,13 +326,13 @@ static void *sr_read_analysis_thread(void *args)
                 kv_push(uint64_t, s_mer, buf_s[buf_pos]);
                 kv_push(uint32_t, m_pos, (hoco_l - w - 1) << 1 | z);
 #ifdef DEBUG_KMER_EXTRACTION
-                kv_push(uint128_t, k_mer_h, hash128(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+                kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
 #else
-                kv_push(uint128_t, k_mer_h, hash128(hoco_s.a, m_pos.a[m_pos.n-1], w));
+                kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
 #endif
                 // remove syncmers at the same position on a read
                 // this is possible as a syncmer could start and end with the same smer
-                if (m_pos.n >= 2 && m_pos.a[m_pos.n-1] >> 1 == m_pos.a[m_pos.n-2] >> 1) s_mer.n -= 2, m_pos.n -= 2, k_mer_h.n -= 2;
+                if (m_pos.n >= 2 && m_pos.a[m_pos.n-1] >> 1 == m_pos.a[m_pos.n-2] >> 1) s_mer.n -= 2, m_pos.n -= 2, k_mer.n -= 2;
             }
             
             buf_m[buf_pos] = m;
@@ -302,9 +344,9 @@ static void *sr_read_analysis_thread(void *args)
                     kv_push(uint64_t, s_mer, s^1);
                     kv_push(uint32_t, m_pos, (hoco_l - w) << 1 | z);
 #ifdef DEBUG_KMER_EXTRACTION
-                    kv_push(uint128_t, k_mer_h, hash128(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
 #else
-                    kv_push(uint128_t, k_mer_h, hash128(hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
 #endif
                 }
                 if (m < mz) mz = m, mz_pos = buf_pos;
@@ -325,9 +367,9 @@ static void *sr_read_analysis_thread(void *args)
                     kv_push(uint64_t, s_mer, s^1);
                     kv_push(uint32_t, m_pos, (hoco_l - w) << 1 | z);
 #ifdef DEBUG_KMER_EXTRACTION
-                    kv_push(uint128_t, k_mer_h, hash128(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
 #else
-                    kv_push(uint128_t, k_mer_h, hash128(hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
 #endif
                 }
             }
@@ -342,11 +384,11 @@ static void *sr_read_analysis_thread(void *args)
             kv_push(uint64_t, s_mer, buf_s[buf_pos]);
             kv_push(uint32_t, m_pos, (hoco_l - w) << 1 | z); // not (hoco_l - w - 1) as hoco_l no self increment yet
 #ifdef DEBUG_KMER_EXTRACTION
-            kv_push(uint128_t, k_mer_h, hash128(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+            kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
 #else
-            kv_push(uint128_t, k_mer_h, hash128(hoco_s.a, m_pos.a[m_pos.n-1], w));
+            kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
 #endif
-            if (m_pos.n >= 2 && m_pos.a[m_pos.n-1] >> 1 == m_pos.a[m_pos.n-2] >> 1) s_mer.n -= 2, m_pos.n -= 2, k_mer_h.n -= 2;
+            if (m_pos.n >= 2 && m_pos.a[m_pos.n-1] >> 1 == m_pos.a[m_pos.n-2] >> 1) s_mer.n -= 2, m_pos.n -= 2, k_mer.n -= 2;
         }
     
         if (hoco_s.n) MYREALLOC(hoco_s.a, hoco_s.n);
@@ -355,7 +397,7 @@ static void *sr_read_analysis_thread(void *args)
         if (n_nucl.n) MYREALLOC(n_nucl.a, n_nucl.n);
         if (m_pos.n) MYREALLOC(m_pos.a, m_pos.n);
         if (s_mer.n) MYREALLOC(s_mer.a, s_mer.n);
-        if (k_mer_h.n) MYREALLOC(k_mer_h.a, k_mer_h.n);
+        if (k_mer.n) MYREALLOC(k_mer.a, k_mer.n);
 
         sr.hoco_l = hoco_l;
         sr.hoco_s = hoco_s.a;
@@ -365,8 +407,8 @@ static void *sr_read_analysis_thread(void *args)
         sr.n = m_pos.n;
         sr.m_pos = m_pos.a;
         sr.s_mer = s_mer.a;
-        sr.k_mer_h = k_mer_h.a;
-        kv_push(sr_t, dat->sr, sr);
+        sr.k_mer = k_mer.a;
+        kv_push(sr_t, *dat->sr_db, sr);
 
         free(seq);
     }
@@ -374,12 +416,11 @@ static void *sr_read_analysis_thread(void *args)
     return NULL;
 }
 
-static void do_analysis(p_data_t *dat, pthread_t *threads, int n_threads, sr_v *sr)
+static void do_analysis(p_data_t *dat, pthread_t *threads, int n_threads, sr_db_t *sr_db)
 {
     int t;
-    uint64_t i;
     for (t = 1; t < n_threads; ++t)
-        pthread_create(threads + t, NULL, sr_read_analysis_thread, dat + t);
+        pthread_create(threads + t, NULL, sr_read_analysis_thread, &dat[t]);
 
     sr_read_analysis_thread(dat);
 
@@ -387,17 +428,22 @@ static void do_analysis(p_data_t *dat, pthread_t *threads, int n_threads, sr_v *
         pthread_join(threads[t], NULL);
 
     for (t = 0; t < n_threads; ++t) {
-        for (i = 0; i < dat[t].sr.n; ++i)
-            kv_push(sr_t, *sr, dat[t].sr.a[i]);
+        kv_pushn(sr_t, *sr_db, dat[t].sr_db->a, dat[t].sr_db->n);
         dat[t].n_reads = 0;
-        dat[t].sr.n = 0;
+        dat[t].sr_db->n = 0;
     }
 
     return;
 }
 
-static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD)
+static void sr_read_single_thread(sstream_t *s_stream, sr_db_t *sr_db, size_t mD)
 {
+    sr_db_clean(sr_db);
+    sr_db_init(sr_db, sr_db->k, sr_db->s);
+
+    if (mD == 0)
+        mD = SIZE_MAX;
+
     p_data_t *dat;
     MYCALLOC(dat, 1);
     dat->n_reads = 1;
@@ -405,12 +451,7 @@ static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w, s
     MYMALLOC(dat->name, 1);
     MYMALLOC(dat->seq, 1);
     MYMALLOC(dat->len, 1);
-    dat->k = k;
-    dat->w = w;
-    kv_init(dat->sr);
-
-    if (mD == 0)
-        mD = SIZE_MAX;
+    dat->sr_db = sr_db;
 
     int l;
     uint64_t i;
@@ -430,11 +471,6 @@ static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w, s
         }
     }
 
-    if (sr->n) free(sr->a);
-    sr->a = dat->sr.a;
-    sr->n = dat->sr.n;
-    sr->m = dat->sr.m;
-
     free(dat->sid);
     free(dat->name);
     free(dat->seq);
@@ -444,21 +480,22 @@ static void sr_read_single_thread(sstream_t *s_stream, sr_v *sr, int k, int w, s
     return;
 }
 
-void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD, int n_threads)
+void sr_read(sstream_t *s_stream, sr_db_t *sr_db, size_t mD, int n_threads)
 {
     if (n_threads == 1) {
-        sr_read_single_thread(s_stream, sr, k, w, mD);
+        sr_read_single_thread(s_stream, sr_db, mD);
         return;
     }
 
+    sr_db_clean(sr_db);
+    sr_db_init(sr_db, sr_db->k, sr_db->s);
+    
     if (mD == 0)
         mD = SIZE_MAX;
 
     p_data_t *dat;
     int t;
     uint64_t batch_n;
-    size_t D;
-    
     MYCALLOC(dat, n_threads);
     batch_n = 10000;
     for (t = 0; t < n_threads; ++t) {
@@ -467,15 +504,15 @@ void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD, int n_threa
         MYMALLOC(dat[t].name, batch_n);
         MYMALLOC(dat[t].seq, batch_n);
         MYMALLOC(dat[t].len, batch_n);
-        dat[t].k = k;
-        dat[t].w = w;
-        kv_init(dat[t].sr);
-        kv_resize(sr_t, dat[t].sr, batch_n);
+        MYMALLOC(dat[t].sr_db, 1);
+        sr_db_init(dat[t].sr_db, sr_db->k, sr_db->s);
+        kv_resize(sr_t, *dat[t].sr_db, batch_n);
     }
 
     pthread_t threads[n_threads];
     int l;
     uint64_t i, j, n;
+    size_t D;
     i = j = n = 0;
     D = 0;
     while ((l = sstream_read(s_stream)) >= 0) {
@@ -489,7 +526,7 @@ void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD, int n_threa
 
         ++i, ++j;
         if (j == batch_n * n_threads) {
-            do_analysis(dat, threads, n_threads, sr);
+            do_analysis(dat, threads, n_threads, sr_db);
             j = 0;
         }
 
@@ -499,14 +536,15 @@ void sr_read(sstream_t *s_stream, sr_v *sr, int k, int w, size_t mD, int n_threa
             break;
         }
     }
-    if (j > 0) do_analysis(dat, threads, n_threads, sr);
+    if (j > 0) do_analysis(dat, threads, n_threads, sr_db);
 
     for (t = 0; t < n_threads; ++t) {
         free(dat[t].sid);
         free(dat[t].name);
         free(dat[t].seq);
         free(dat[t].len);
-        kv_destroy(dat[t].sr);
+        free(dat[t].sr_db->a);
+        free(dat[t].sr_db);
     }
     free(dat);
 
@@ -518,23 +556,23 @@ KHASHL_MAP_INIT(KH_LOCAL, kh_ctab_t, kh_ctab, khint_t, int, kh_hash_uint32, kh_e
 static int syncmer_s_cmpfunc(const void *a, const void *b)
 {
     uint64_t x, y;
-    uint128_t s, t;
+    uint64_t s, t;
     x = ((syncmer_t *) a)->s;
     y = ((syncmer_t *) b)->s;
     s = ((syncmer_t *) a)->h;
     t = ((syncmer_t *) b)->h;
-    return x == y? (s == t? 0 : (s > t? 1 : -1)) : (x > y? 1 : -1);
+    return x == y? ((s > t) - (s < t)) : ((x > y) - (x < y));
 }
 
 static int syncmer_h_cmpfunc(const void *a, const void *b)
 {
-    uint128_t x, y;
+    uint64_t x, y;
     uint64_t s, t;
     x = ((syncmer_t *) a)->h;
     y = ((syncmer_t *) b)->h;
     s = ((syncmer_t *) a)->s;
     t = ((syncmer_t *) b)->s;
-    return x == y? (s == t? 0 : (s > t? 1 : -1)) : (x > y? 1 : -1);
+    return x == y? ((s > t) - (s < t)) : ((x > y) - (x < y));
 }
 
 static int int64_cmpfunc(const void *a, const void *b)
@@ -542,6 +580,14 @@ static int int64_cmpfunc(const void *a, const void *b)
     int64_t x, y;
     x = *(int64_t *) a;
     y = *(int64_t *) b;
+    return (x > y) - (x < y);
+}
+
+static int uint128_cmpfunc(const void *a, const void *b)
+{
+    uint128_t x, y;
+    x = *(uint128_t *) a;
+    y = *(uint128_t *) b;
     return (x > y) - (x < y);
 }
 
@@ -814,28 +860,36 @@ static int ha_analyze_count(int n_cnt, int start_cnt, const int64_t *cnt, int *p
     }
 }
 
-void sr_stat(sr_v *sr, sr_stat_t *stats, int w, FILE *fo, int verbose)
+void sr_db_stat(sr_db_t *sr_db, FILE *fo, int verbose)
 {
     size_t i, j, n, m;
-    int c, p0, p1;
+    int c, w, p0, p1;
     uint64_t s;
-    uint128_t h;
+    uint64_t h;
     kvec_t(syncmer_t) syncmers;
     kh_ctab_t *dist_ctab, *smer_ctab, *kmer_ctab, *smer_k_ctab;
+
+    sr_stat_t *stats;
+    stats = sr_db->stats;
+    if (!stats) {
+        MYCALLOC(stats, 1);
+        sr_db->stats = stats;
+    }
 
     dist_ctab = kh_ctab_init();
     smer_ctab = kh_ctab_init();
     kmer_ctab = kh_ctab_init();
     smer_k_ctab = kh_ctab_init();
     kv_init(syncmers);
-    n = sr->n;
+    w = sr_db->k;
+    n = sr_db->n;
     m = 0;
     for (i = 0; i < n; ++i) {
-        sr_t s = sr->a[i];
+        sr_t s = sr_db->a[i];
         m += s.n;
         p0 = p1 = MAX_RD_LEN;
         for (j = 0; j < s.n; ++j) {
-            syncmer_t a = {s.k_mer_h[j], s.s_mer[j], 0, 0, 0};
+            syncmer_t a = {s.k_mer[j] >> 1, s.s_mer[j], 0, 0, 0};
             kv_push(syncmer_t, syncmers, a);
             p0 = p1;
             p1 = s.m_pos[j] >> 1;
@@ -969,15 +1023,15 @@ void sr_stat(sr_v *sr, sr_stat_t *stats, int w, FILE *fo, int verbose)
     return;
 }
 
-int sr_validate(sr_v *sr)
+int sr_db_validate(sr_db_t *sr_db)
 {
-    if (sr->n > MAX_RD_NUM) {
+    if (sr_db->n > MAX_RD_NUM) {
         fprintf(stderr, "[E::%s] read number exceeds the limit %llu\n", __func__, MAX_RD_NUM);
         return 1;
     }
     size_t i;
-    for (i = 0; i < sr->n; ++i) {
-        sr_t *s = &sr->a[i];
+    for (i = 0; i < sr_db->n; ++i) {
+        sr_t *s = &sr_db->a[i];
         if (s->n > MAX_RD_SCM) {
             fprintf(stderr, "[E::%s] syncmer number (%u) on read exceeds the limit %llu: %s\n", __func__, s->n, MAX_RD_SCM, s->sname);
             return 2;
@@ -988,24 +1042,67 @@ int sr_validate(sr_v *sr)
 
 void sr_destroy(sr_t *sr)
 {
+    if (!sr) return;
     if (sr->sname) free(sr->sname);
     if (sr->hoco_s) free(sr->hoco_s);
     if (sr->ho_rl) free(sr->ho_rl);
     if (sr->ho_l_rl) free(sr->ho_l_rl);
     if (sr->n_nucl) free(sr->n_nucl);
     if (sr->s_mer) free(sr->s_mer);
-    if (sr->k_mer_h) free(sr->k_mer_h);
+    if (sr->k_mer) free(sr->k_mer);
     if (sr->m_pos) free(sr->m_pos);
 }
 
-void sr_v_destroy(sr_v *sr_v)
+void sr_db_init(sr_db_t *sr_db, int k, int s)
 {
-    if (!sr_v) return;
+    if (!sr_db) return;
+    kv_init(*sr_db);
+    sr_db->k = k;
+    sr_db->s = s;
+    sr_db->stats = 0;
+}
+
+void sr_db_clean(sr_db_t *sr_db)
+{
+    if (!sr_db) return;
     size_t i;
-    for (i = 0; i < sr_v->n; ++i)
-        sr_destroy(&sr_v->a[i]);
-    kv_destroy(*sr_v);
-    free(sr_v);
+    for (i = 0; i < sr_db->n; ++i)
+        sr_destroy(&sr_db->a[i]);
+    kv_destroy(*sr_db);
+    free(sr_db->stats);
+}
+
+void sr_db_destroy(sr_db_t *sr_db)
+{
+    if (!sr_db) return;
+    sr_db_clean(sr_db);
+    free(sr_db);
+}
+
+void syncmer_db_init(syncmer_db_t *scm_db)
+{
+    if (!scm_db) return;
+    kv_init(*scm_db);
+    scm_db->c = 0;
+    scm_db->h = 0;
+}
+
+void syncmer_db_clean(syncmer_db_t *scm_db)
+{
+    if (!scm_db) return;
+    size_t i;
+    for (i = 0; i < scm_db->n; ++i)
+        free(scm_db->a[i].m_pos);
+    kv_destroy(*scm_db);
+    free(scm_db->c);
+    free(scm_db->h);
+}
+
+void syncmer_db_destroy(syncmer_db_t *scm_db)
+{
+    if (!scm_db) return;
+    syncmer_db_clean(scm_db);
+    free(scm_db);
 }
 
 static void fputs_smer(uint64_t s, int k, FILE *fo)
@@ -1067,7 +1164,7 @@ void print_syncmer_on_seq(sr_t *sr, uint32_t n, int k, int w, FILE *fo)
     fprintf(fo, "MM:Z:");
     fputs_smer(sr->s_mer[n] >> 1, k, fo);
     fputc('\t', fo);
-    fprintf(fo, "KH:Z:%064lu%064lu\n", (uint64_t) (sr->k_mer_h[n] >> 64), (uint64_t) sr->k_mer_h[n]);
+    fprintf(fo, "KH:Z:%lu\n", sr->k_mer[n]);
     fputs_kmer(sr->hoco_s, sr->m_pos[n], w, fo);
     fputc('\n', fo);
 }
@@ -1131,110 +1228,218 @@ void get_kmer_seq(uint8_t *hoco_s, uint32_t pos, int l, uint32_t rev, uint8_t *k
     }
 }
 
-typedef struct {uint128_t h; uint64_t s; uint64_t m_pos;} syncmer1_t;
-
-static int syncmer1_h_cmpfunc(const void *a, const void *b)
+void get_kmer_dna_seq(uint8_t *hoco_s, uint32_t pos, int l, uint32_t rev, char *dna_seq)
 {
-    uint128_t x, y;
-    uint64_t s, t;
-    x = ((syncmer1_t *) a)->h;
-    y = ((syncmer1_t *) b)->h;
-    s = ((syncmer1_t *) a)->s;
-    t = ((syncmer1_t *) b)->s;
-    return x == y? (s == t? 0 : (s > t? 1 : -1)) : (x > y? 1 : -1);
+    int i, j;
+    uint32_t p;
+    for (i = 0; i < l; ++i) {
+        p = pos + i;
+        dna_seq[i] = char_nt4_table[(hoco_s[p/4]>>(((p&3)^3)<<1))&3];
+    }
+    if (rev) {
+        char t;
+        for (i = 0, j = l - 1; i < j; ++i, --j) {
+            t = dna_seq[i];
+            dna_seq[i] = seq_nt4_comp_table[(int) dna_seq[j]];
+            dna_seq[j] = seq_nt4_comp_table[(int) t];
+        }
+        if (i == j) dna_seq[i] = seq_nt4_comp_table[(int) dna_seq[j]];
+    }
 }
 
-syncmer_t *collect_syncmer_from_reads(sr_v *sr, uint64_t *n)
+static inline int equal_array(void *a, void *b, int n)
+{
+    uint64_t *x = (uint64_t *) a;
+    uint64_t *y = (uint64_t *) b;
+    int i;
+    for (i = 0; i < n; ++i)
+        if (x[i] != y[i])
+            return 0;
+    return 1;
+}
+
+// process a cluster of kmers with the same hash value
+// check hash collisions
+// add kmer to database
+static void process_kmer_cluster(uint128_t *scm, uint32_t n, syncmer_db_t *scm_db, sr_db_t *sr_db)
+{
+    int n_clus, *clus;
+    MYMALLOC(clus, n);
+
+    if (n == 1) {
+        // no hash collision for sure
+        n_clus = 1;
+        clus[0] = 0;
+    } else {
+        int i, j, k, b, c, B, C, p0, p1, rev, res;
+        uint8_t *kmer, *kmer_list;
+        uint32_t n_s;
+        uint64_t sid;
+        size_t s;
+
+        k = sr_db->k;
+        B = (((k - 1) >> 3) + 1) << 3; // maxmum number bytes to hold syncmer 64bit aligned
+        C = B >> 3; // number of comparsions of 64bit interger
+        n_clus = 0;
+        kmer_list = 0;
+        MYMALLOC(kmer, B);
+
+        for (s = 0; s < n; ++s) {
+            sid = (uint64_t) scm[s] >> 32;
+            n_s = (uint32_t) ((uint64_t) scm[s]) >> 1;
+            rev = scm[s] & 1;
+            p0 = sr_db->a[sid].m_pos[n_s] >> 1;
+            p1 = p0 + k - 1;
+            res = rev? ((p1&3)^3)<<1 : (p0&3)<<1;
+            b = p1 / 4 - p0 / 4 + 1; // actual number bytes holding syncmer
+            memcpy(kmer, sr_db->a[sid].hoco_s + p0 / 4, b);
+            // do reverse complementary
+            if (rev) {
+                for (i = 0, j = b - 1; i < j; ++i, --j) {
+                    c = kmer[i];
+                    kmer[i] = comp_seq8_table[kmer[j]];
+                    kmer[j] = comp_seq8_table[c];
+                }
+                if (i == j) kmer[i] = comp_seq8_table[kmer[i]];
+            }
+            // do bit shift to align syncmer bytes
+            for (i = 0; i < b - 1; ++i) {
+                kmer[i] <<= res;
+                kmer[i] |= kmer[i+1] >> (8-res);
+            }
+            kmer[b-1] <<= res;
+            // mask the lower bits
+            kmer[b-1] &= lmask[k&3];
+            // mask the remaining bytes
+            MYBZERO(&kmer[b], B - b);
+            // compare to the existing kmers to find hash collision
+            for (i = 0; i < n_clus; ++i)
+                if (equal_array(kmer, &kmer_list[i * B], C))
+                    break;
+            clus[s] = i;
+            if (i >= n_clus) {
+                // new kmer
+                // add to kmer list
+                ++n_clus;
+                MYREALLOC(kmer_list, n_clus * B);
+                memcpy(&kmer_list[(n_clus - 1) * B], kmer, B);
+            }
+        }
+#ifdef DEBUG_CHECK_HASH_COLLISION
+        uint64_t h64 = (uint64_t) (scm[0] >> 64);
+        for (i = 0; i < n_clus; ++i)
+            assert(h64 == MurmurHash64A(&kmer_list[i * B], (k - 1) / 4 + 1, murmur3_seed));
+#endif
+        free(kmer);
+        free(kmer_list);
+    }
+
+    // add each cluster to syncmer database
+    uint32_t s, *cnts;
+    MYCALLOC(cnts, n_clus);
+    for (s = 0; s < n; ++s)
+        ++cnts[clus[s]];
+
+    syncmer_t *syncmer;
+    int i;
+    for (i = 0; i < n_clus; ++i) {
+        kv_pushp(syncmer_t, *scm_db, &syncmer);
+        syncmer->h = (uint64_t) (scm[0] >> 64);
+        syncmer->s = UINT64_MAX; // UINT64_MAX cannot be a smer as the first bit of smer is always zero
+        syncmer->cov = 0;
+        syncmer->del = 0;
+        MYMALLOC(syncmer->m_pos, cnts[i]);
+    }
+
+    uint64_t smer;
+    for (s = 0; s < n; ++s) {
+        // update syncmer database
+        syncmer = &scm_db->a[scm_db->n - n_clus + clus[s]];
+        syncmer->m_pos[syncmer->cov++] = (uint64_t) scm[s];
+        smer = sr_db->a[(uint64_t) scm[s] >> 32].s_mer[(uint32_t) ((uint64_t) scm[s]) >> 1];
+        if (syncmer->s == UINT64_MAX) {
+            syncmer->s = smer;
+        } else if (syncmer->s != smer) {
+            fprintf(stderr, "[E::%s] identical kmers have different smers\n", __func__);
+            fprintf(stderr, "[E::%s] kmer hash  : %lu\n", __func__, syncmer->h);
+            fprintf(stderr, "[E::%s] smer code 0: %lu; read id: %lu\n", __func__, syncmer->s, syncmer->m_pos[0] >> 32);
+            fprintf(stderr, "[E::%s] smer code 1: %lu; read id: %lu\n", __func__, smer, (uint64_t) scm[s] >> 32);
+            exit(EXIT_FAILURE);
+        }
+        // update read database
+        sr_db->a[(uint64_t) scm[s] >> 32].k_mer[(uint32_t) ((uint64_t) scm[s]) >> 1] = (scm_db->n - n_clus + clus[s]) << 1;
+    }
+
+#ifdef DEBUG_CHECK_HASH_COLLISION
+    if (n_clus > 1) {
+        fprintf(stderr, "[DEBUG_CHECK_HASH_COLLISION::%s] hash collision: hash = %lu; clus = %d\n", 
+                __func__, (uint64_t) (scm[0] >> 64), n_clus);
+        for (i = 0; i < n_clus; ++i)
+            fprintf(stderr, "[DEBUG_CHECK_HASH_COLLISION::%s] clus %d: read id %lu\n", 
+                    __func__, i, scm_db->a[scm_db->n - n_clus + i].m_pos[0] >> 32);
+    }
+#endif    
+
+    free(cnts);
+    free(clus);
+}
+
+// make syncmer database from reads
+// change the read kmer hash to kmer id
+syncmer_db_t *collect_syncmer_from_reads(sr_db_t *sr_db)
 {
     size_t i, j;
-    uint32_t c;
     uint64_t n1, n2;
     sr_t *s;
-    kvec_t(syncmer1_t) scm1;
-    kv_init(scm1);
+    kvec_t(uint128_t) scm;
+    kv_init(scm);
     n1 = 0;
-    for (i = 0; i < sr->n; ++i) {
-        s = &sr->a[i];
+    for (i = 0; i < sr_db->n; ++i) {
+        s = &sr_db->a[i];
         assert(s->sid == i);
         n1 += s->n;
         for (j = 0; j < s->n; ++j) {
-            syncmer1_t s1 = {s->k_mer_h[j], s->s_mer[j], (s->sid << 32) | (j << 1) | (s->m_pos[j] & 1)};
-            kv_push(syncmer1_t, scm1, s1);
+            uint128_t s1 = (uint128_t) s->k_mer[j] << 64 | ((s->sid << 32) | (j << 1) | (s->m_pos[j] & 1));
+            kv_push(uint128_t, scm, s1);
         }
     }
-    if (scm1.n == 0) {
-        kv_destroy(scm1);
-        if (n) *n = 0;
+    if (scm.n == 0) {
+        kv_destroy(scm);
         return 0;
     }
 
-    qsort(scm1.a, scm1.n, sizeof(syncmer1_t), syncmer1_h_cmpfunc);
+    qsort(scm.a, scm.n, sizeof(uint128_t), uint128_cmpfunc);
 
-    // pack syncmers by kmer hash128
-    kvec_t(syncmer_t) scm;
-    kv_init(scm);
-    uint128_t h128 = scm1.a[0].h;
-    uint64_t s64 = scm1.a[0].s;
-    c = 1;
-    for (i = 1; i < scm1.n; ++i) {
-        if (scm1.a[i].h == h128) {
-            ++c;
-            // syncmers with same hash values should have same smers
-            if (scm1.a[i].s != s64) {
-                fprintf(stderr, "[E::%s] identical kmers have different smers\n", __func__);
-                fprintf(stderr, "[E::%s] kmer hash: %064lu%064lu\n", __func__, (uint64_t) (h128>>64), (uint64_t) h128);
-                fprintf(stderr, "[E::%s] smer code: %lu\n", __func__, s64);
-                for (j = i + 1 - c; j <= i; ++j) {
-                    syncmer1_t *m = &scm1.a[j];
-                    fprintf(stderr, "[E::%s] %064lu%064lu %lu %lu %llu %u\n", __func__,
-                            (uint64_t) (m->h>>64), (uint64_t) m->h, m->s, m->m_pos>>32, m->m_pos>>1&MAX_RD_SCM,
-                            sr->a[m->m_pos>>32].m_pos[m->m_pos>>1&MAX_RD_SCM]>>1);
-                }
-                exit(EXIT_FAILURE);
-            }
-        } else {
-            uint64_t *m_pos;
-            MYMALLOC(m_pos, c);
-            for (j = i - c; j < i; ++j)
-                m_pos[j+c-i] = scm1.a[j].m_pos;
-            syncmer_t s1 = {h128, s64, m_pos, c, 0};
-            kv_push(syncmer_t, scm, s1);
+    // pack syncmers by kmer hash
+    // check hash collisions
+    syncmer_db_t *scm_db;
+    size_t last;
+    uint64_t h64;
+    MYMALLOC(scm_db, 1);
+    syncmer_db_init(scm_db);
+    h64 = (uint64_t) (scm.a[0] >> 64);
+    for (i = 1, last = 0; i < scm.n; ++i) {
+        if ((uint64_t) (scm.a[i] >> 64) != h64) {
+            // process kmer cluster
+            process_kmer_cluster(&scm.a[last], i - last, scm_db, sr_db);
 
-            h128 = scm1.a[i].h;
-            s64 = scm1.a[i].s;
-            c = 1;
+            last = i;
+            h64 = (uint64_t) (scm.a[i] >> 64);
         }
     }
+    process_kmer_cluster(&scm.a[last], i - last, scm_db, sr_db);
+    kv_destroy(scm);
 
-    uint64_t *m_pos;
-    MYMALLOC(m_pos, c);
-    for (j = i - c; j < i; ++j)
-        m_pos[j+c-i] = scm1.a[j].m_pos;
-    syncmer_t s1 = {h128, s64, m_pos, c, 0};
-    kv_push(syncmer_t, scm, s1);
+    MYREALLOC(scm_db->a, scm_db->n);
+    scm_db->m = scm_db->n;
+    MYMALLOC(scm_db->c, scm_db->n);
+    for (i = 0; i < scm_db->n; ++i) scm_db->c[i] = 1;
 
     n2 = 0;
-    for (i = 0; i < scm.n; ++i) n2 += scm.a[i].k_cov;
-
+    for (i = 0; i < scm_db->n; ++i) n2 += scm_db->a[i].cov;
     assert(n1 == n2);
 
-    kv_destroy(scm1);
-
-    MYREALLOC(scm.a, scm.n);
-
-    if (n) *n = scm.n;
-    return scm.a;
-}
-
-static void syncmer_vec_destroy(syncmer_t *s, size_t n)
-{
-    if (s) {
-        size_t i;
-        for (i = 0; i < n; ++i)
-            if (s[i].m_pos)
-                free(s[i].m_pos);
-        free(s);
-    }
+    return scm_db;
 }
 
 static kh_inline khint_t kh_hash_uint128(uint128_t key)
@@ -1283,57 +1488,54 @@ typedef struct {uint32_t c, l; double f;} pt1_t;
 
 static int pt1_f_cmpfunc(const void *a, const void *b)
 {
+    if (((pt1_t *) a)->f == ((pt1_t *) b)->f)
+        return (((pt1_t *) a)->c > ((pt1_t *) b)->c) - (((pt1_t *) a)->c < ((pt1_t *) b)->c);
     return (((pt1_t *) a)->f > ((pt1_t *) b)->f) - (((pt1_t *) a)->f < ((pt1_t *) b)->f);
 }
 
 /***
 static int pt1_c_cmpfunc(const void *a, const void *b)
 {
+    if (((pt1_t *) a)->c == ((pt1_t *) b)->c)
+        return (((pt1_t *) a)->l > ((pt1_t *) b)->l) - (((pt1_t *) a)->l < ((pt1_t *) b)->l);
     return (((pt1_t *) a)->c > ((pt1_t *) b)->c) - (((pt1_t *) a)->c < ((pt1_t *) b)->c);
 }
 
 static int pt1_l_cmpfunc(const void *a, const void *b)
 {
+    if (((pt1_t *) a)->l == ((pt1_t *) b)->l)
+        return (((pt1_t *) a)->c > ((pt1_t *) b)->c) - (((pt1_t *) a)->c < ((pt1_t *) b)->c);
     return (((pt1_t *) a)->l > ((pt1_t *) b)->l) - (((pt1_t *) a)->l < ((pt1_t *) b)->l);
 }
 **/
 
-int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_seq, uint32_t min_pt, 
-        double min_f, double **_beta, double **_bse, double **_r2, int verbose)
+// this subroutine is to analyse the relationship between 
+// read coverage and link counts given the distance (measured by syncmer distance)
+// tries to construct a series of linear regressions 
+// N_LINK = beta * N_COV_d
+// for disntace d = 2...D (upper bound D subject to data amount)
+int syncmer_link_coverage_analysis(sr_db_t *sr_db, syncmer_db_t *scm_db, uint32_t min_k_cov, uint32_t min_n_seq, 
+        uint32_t min_pt, double min_f, double **_beta, double **_bse, double **_r2, int verbose)
 {
-    uint64_t i, j, n_scm;
+    uint64_t i, j;
     syncmer_t *scm;
     
     min_pt = MAX(min_pt, 30);
     min_f  = MAX(min_f,  .0);
 
-    // collect all syncmers
-    scm = collect_syncmer_from_reads(sr, &n_scm);
-    
-    // build syncmer hash h128 to id map
-    int absent;
-    khint_t k;
-    kh_scm_t *h_scm;
-    h_scm = kh_scm_init();
-    for (i = 0; i < n_scm; ++i) {
-        k = kh_scm_put(h_scm, scm[i].h, &absent);
-        kh_val(h_scm, k) = i;
-    }
-    
+    scm = scm_db->a;
+
     // collect read length - syncmer count
     kh_ctab_t *rl_ctab;
     int64_t *rl_cnts, *rd_cnts;
     uint32_t max_n;
     rl_ctab = kh_ctab_init();
     max_n = 0;
-    for (i = 0; i < sr->n; ++i) {
-        max_n = MAX(max_n, sr->a[i].n);
-        kh_ctab_put1(rl_ctab, sr->a[i].n);
+    for (i = 0; i < sr_db->n; ++i) {
+        max_n = MAX(max_n, sr_db->a[i].n);
+        kh_ctab_put1(rl_ctab, sr_db->a[i].n);
     }
-    if (max_n == 0) {
-        syncmer_vec_destroy(scm, n_scm);
-        return 0;
-    }
+    if (max_n == 0) return 0;
 
     rl_cnts = kh_ctab_cnt(rl_ctab, max_n);
     kh_ctab_destroy(rl_ctab);
@@ -1356,7 +1558,8 @@ int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_
     uint128_t v_p;
     double *beta, *bse, *r2, c0, c1;
     kvec_t(pt1_t) pt1;
-    
+    khint_t k;
+
     a_cov = kh_scm_init();
     k_cn = kh_kcn_init();
     kv_init(pt1);
@@ -1372,16 +1575,16 @@ int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_
         // do coverage analysis
         // the gap will be i-2
         kh_scm_m_clear(a_cov);
-        for (j = 0; j < sr->n; ++j) {
-            s = &sr->a[j];
+        for (j = 0; j < sr_db->n; ++j) {
+            s = &sr_db->a[j];
             if (s->n < i) continue;
             // collect scm_id along reads
             for (a = 0; a < s->n; ++a)
-                scm_id[a] = kh_val(h_scm, kh_scm_get(h_scm, s->k_mer_h[a]));
+                scm_id[a] = s->k_mer[a] >> 1;
             // collect coverage
             for (a = i-1; a < s->n; ++a) {
-                if (scm[scm_id[a+1-i]].k_cov < min_k_cov || 
-                        scm[scm_id[a]].k_cov < min_k_cov)
+                if (scm[scm_id[a+1-i]].cov < min_k_cov || 
+                        scm[scm_id[a]].cov < min_k_cov)
                     continue;
                 v0 = scm_id[a+1-i] << 1 | (s->m_pos[a+1-i] & 1);
                 v1 = scm_id[a] << 1 | (s->m_pos[a] & 1);
@@ -1420,7 +1623,7 @@ int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_
                 v1 = ((uint64_t) v_p) >> 1;
                 c0 = MAX(2, kh_kcn_get1(k_cn, v0)) / 2.0;
                 c1 = MAX(2, kh_kcn_get1(k_cn, v1)) / 2.0;
-                c = (uint32_t) (MIN(scm[v0].k_cov/c0, scm[v1].k_cov/c1));
+                c = (uint32_t) (MIN(scm[v0].cov/c0, scm[v1].cov/c1));
                 v_v = MIN(v_v, c);
                 fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] lc_cnts: %lu %u %u\n", __func__, i-2, c, v_v);
             }
@@ -1437,7 +1640,7 @@ int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_
             v1 = ((uint64_t) v_p) >> 1;
             c0 = MAX(2, kh_kcn_get1(k_cn, v0)) / 2.0;
             c1 = MAX(2, kh_kcn_get1(k_cn, v1)) / 2.0;
-            c = (uint32_t) (MIN(scm[v0].k_cov/c0, scm[v1].k_cov/c1));
+            c = (uint32_t) (MIN(scm[v0].cov/c0, scm[v1].cov/c1));
             v_v = MIN(v_v, c);
             pt1_t pt = {c, v_v, (double) v_v / c};
             kv_push(pt1_t, pt1, pt);
@@ -1503,12 +1706,14 @@ int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_
     for (i = 0; i <= max_n; ++i)
         fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] rd_cnts: %lu %ld\n", __func__, i, rd_cnts[i]);
     for (i = 2; i < max_n; ++i)
-        fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] rd_regs: %lu %u %.6f %.6f %.6f\n", __func__, i-2, pt_n[i], beta[i], bse[i], r2[i]);
+        fprintf(stderr, "[DEBUG_LINK_COVERAGE::%s] rd_regs: %lu %u %.6f %.6f %.6f\n", __func__, 
+                i-2, pt_n[i], beta[i], bse[i], r2[i]);
 #endif
 
     if (verbose > 0) {
         for (i = 2; i < n1; ++i)
-            fprintf(stderr, "[M::%s] G: %lu N: %u D: %ld coeff: %.6f bse: %.6f R2: %.6f\n", __func__, i-2, pt_n[i], rd_cnts[i], beta[i], bse[i], r2[i]);
+            fprintf(stderr, "[M::%s] G: %lu N: %u D: %ld coeff: %.6f bse: %.6f R2: %.6f\n", __func__, 
+                    i-2, pt_n[i], rd_cnts[i], beta[i], bse[i], r2[i]);
     }
 
     if (n1 > 0) {
@@ -1527,7 +1732,6 @@ int syncmer_link_coverage_analysis(sr_v *sr, uint32_t min_k_cov, uint32_t min_n_
         }
     }
 
-    syncmer_vec_destroy(scm, n_scm);
     kh_scm_destroy(a_cov);
     kh_kcn_destroy(k_cn);
     kv_destroy(pt1);

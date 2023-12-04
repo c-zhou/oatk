@@ -32,7 +32,6 @@
 #define __MISC_UTILITY_H__
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 #include <stdio.h>
 
 extern double realtime0;
@@ -81,6 +80,9 @@ void sys_init(void);
 void sleep_ms(int ms);
 void check_executable(char *exe);
 int run_system_cmd(char *cmd, int retry);
+int is_file(const char *path);
+int is_dir(const char *path);
+int is_fifo(const char *path);
 char *make_tempfile(char *temp_dir, char *file_template, const char *suffix);
 FILE *open_outstream(char *prefix, char *suffix);
 void parse_pathname(char *path, char **_dirname, char **_basename);

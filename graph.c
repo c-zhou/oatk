@@ -145,7 +145,8 @@ void asmg_shrink_link_id(asmg_t *g)
     }
 }
 
-static void asmg_cleanup(asmg_t *g) {
+static void asmg_cleanup(asmg_t *g) 
+{
     uint64_t i, j, n, *v_idx;
     asmg_arc_t *a;
 
@@ -201,7 +202,8 @@ static void asmg_cleanup(asmg_t *g) {
     free(v_idx);
 }
 
-static uint32_t asmg_arc_fix_symm(asmg_t *g) {
+static uint32_t asmg_arc_fix_symm(asmg_t *g) 
+{
     uint32_t symm_fix;
     uint64_t i, v, w, n;
     asmg_arc_t *a, *a1;
@@ -216,21 +218,37 @@ static uint32_t asmg_arc_fix_symm(asmg_t *g) {
         a1 = asmg_arc1(g, w^1, v^1);
         if (a1 == 0) {
             // add symm arc
-            a1 = asmg_arc_add(g, w^1, v^1, a->lo, a->link_id, a->cov, a->comp^1);
+            a1 = asmg_arc_add(g, w^1, v^1, a->ln, a->ls, a->link_id, a->cov, a->comp^1);
             ++symm_fix;
         } else {
             // fix symm flag
             a1->comp = a->comp^1;
+            // FIXME overlap length difference
+            if (a->ln != a1->ln)
+                a->ln = a1->ln = MIN(a->ln, a1->ln);
+            if (a->ls != a1->ls)
+                a->ls = a1->ls = MIN(a->ls, a1->ls);
         }
-        // FIXME
-        if (a->lo != a1->lo)
-            a->lo = a1->lo = MIN(a->lo, a1->lo);
     }
 
     return symm_fix;
 }
 
-void asmg_finalize(asmg_t *g, int do_cleanup) {
+void asmg_arc_fix_cov(asmg_t *g)
+{
+    uint64_t i, n;
+    uint32_t c;
+    asmg_arc_t *arc;
+    for (i = 0, n = g->n_arc; i < n; ++i) {
+        arc = &g->arc[i];
+        if (arc->del) continue;
+        c = MIN(g->vtx[arc->v >> 1].cov, g->vtx[arc->w >> 1].cov);
+        if (c < arc->cov) arc->cov = c;
+    }
+}
+
+void asmg_finalize(asmg_t *g, int do_cleanup) 
+{
     // TODO fix multi-arc
     uint32_t symm_fix;
     if (do_cleanup) asmg_cleanup(g);
@@ -245,6 +263,49 @@ void asmg_finalize(asmg_t *g, int do_cleanup) {
 }
 
 typedef struct { size_t n, m; uint64_t *a; } u64_v_t;
+
+uint64_t *asmg_vtx_list(asmg_t *g, uint64_t *_n)
+{
+    uint64_t i;
+    u64_v_t vlist = {0, 0, 0};
+    for (i = 0; i < g->n_vtx; ++i)
+        if (!g->vtx[i].del)
+            kv_push(uint64_t, vlist, i);
+    MYREALLOC(vlist.a, vlist.n);
+    
+    if (_n) *_n = vlist.n;
+
+    return vlist.a;
+}
+
+void asmg_print(asmg_t *g, FILE *fo, int no_seq)
+{
+    uint64_t i, n;
+    int l, c;
+    char *s;
+    asmg_vtx_t *vtx;
+    asmg_arc_t *arc;
+
+    fprintf(fo, "H\tVN:Z:1.0\n");
+    for (i = 0, n = g->n_vtx; i < n; ++i) {
+        vtx = &g->vtx[i];
+        if (vtx->del) continue;
+        l = vtx->len;
+        s = vtx->seq;
+        c = vtx->cov;
+        if (s && (!no_seq))
+            fprintf(fo, "S\tu%lu\t%.*s\tLN:i:%d\tKC:i:%ld\tSC:f:%.3f\n", i, l, s, l, (int64_t) l * c, (double) c);
+        else
+            fprintf(fo, "S\tu%lu\t*\tLN:i:%d\tKC:i:%ld\tSC:f:%.3f\n", i, l, (int64_t) l * c, (double) c);
+    }
+
+    for (i = 0, n = g->n_arc; i < n; ++i) {
+        arc = &g->arc[i];
+        if (arc->del || arc->comp) continue;
+        fprintf(fo, "L\tu%lu\t%c\tu%lu\t%c\t%ldM\tEC:i:%u\n", arc->v>>1, "+-"[arc->v&1], arc->w>>1, "+-"[arc->w&1], arc->ls, arc->cov);
+        fprintf(fo, "L\tu%lu\t%c\tu%lu\t%c\t%ldM\tEC:i:%u\n", arc->w>>1, "-+"[arc->w&1], arc->v>>1, "-+"[arc->v&1], arc->ls, arc->cov);
+    }
+}
 
 /*********************
  * Probe unitig ends *
@@ -262,34 +323,34 @@ typedef struct { size_t n, m; uint64_t *a; } u64_v_t;
  */
 static inline uint64_t asmg_arc_n2(asmg_t *g, uint64_t v, uint64_t *w, uint64_t *l)
 {
-    uint64_t i, nv, nv0, k, lo, min_l;
+    uint64_t i, nv, nv0, k, ls, min_l;
     asmg_arc_t *av;
     *l = 0, *w = UINT64_MAX;
     if (g->vtx[v>>1].del)
         return 0;
     nv0 = asmg_arc_n(g, v);
     av = asmg_arc_a(g, v);
-    lo = k = 0;
+    ls = k = 0;
     for (i = nv = 0; i < nv0; ++i) {
         if (!av[i].del) {
             ++nv;
             k = i;
-            lo = av[i].lo > lo? av[i].lo : lo;
+            ls = av[i].ls > ls? av[i].ls : ls;
         }
     }
-    min_l = g->vtx[v>>1].len - lo;
+    min_l = g->vtx[v>>1].len - ls;
     *l = min_l;
     *w = nv == 1? av[k].w : UINT64_MAX;
     return nv;
 }
 
-static inline int32_t asmg_uext(asmg_t *g, uint64_t v, int32_t max_ext, uint64_t *ne, uint64_t *le, u64_v_t *a)
+static inline int32_t asmg_uext(asmg_t *g, uint64_t v, int32_t max_ext, uint64_t *ne, uint64_t *le, u64_v_t *a, int tip_only)
 {
     // the extension of circular unitigs will be bounded by max_ext
     // and the return value will be ASMG_VT_MERGEABLE
     int32_t vt;
     uint64_t nv, nw, l, w, n_ext, l_ext;
-    n_ext = l_ext = 0;
+    l = n_ext = l_ext = 0;
     if (a) a->n = 0;
     if (a) kv_push(uint64_t, *a, v);
     do {
@@ -308,6 +369,11 @@ static inline int32_t asmg_uext(asmg_t *g, uint64_t v, int32_t max_ext, uint64_t
         if (a) kv_push(uint64_t, *a, w);
         v = w;
     } while (--max_ext > 0);
+    if (tip_only && vt == ASMG_VT_MULTI_OUT) {
+        // for tip extenstion
+        l_ext -= l;
+        if (a) (*a).n--;
+    }
     if (ne) *ne = n_ext;
     if (le) *le = l_ext;
     return vt;
@@ -335,7 +401,7 @@ uint32_t *asmg_uext_arc_group(asmg_t *g, uint32_t *n_group)
         na = 0;
         for (k = 0; k < 2; ++k) {
             v = i << 1 | k;
-            vt = asmg_uext(g, v, n_vtx*2+1, 0, 0, &a);
+            vt = asmg_uext(g, v, n_vtx*2+1, 0, 0, &a, 0);
             for (j = 1; j < a.n; ++j) {
                 arc_group[asmg_arc1(g, a.a[j-1], a.a[j])->link_id] = group;
                 visited[a.a[j]>>1] = 1;
@@ -477,7 +543,7 @@ static uint64_t asmg_topo_ext(asmg_t *g, uint64_t v0, uint64_t max_dist, int32_t
             if (av[i].del)
                 continue;
             w = av[i].w;
-            l = g->vtx[v>>1].len - av[i].lo;
+            l = g->vtx[v>>1].len - av[i].ls;
             a = g->vtx[v>>1].cov * l;
             t = &b->a[w];
             if (w>>1 == v0>>1) {
@@ -512,25 +578,100 @@ static uint64_t asmg_topo_ext(asmg_t *g, uint64_t v0, uint64_t max_dist, int32_t
 /******************
  * graph cleaning *
  * ****************/
+#undef DEBUG_EXEC_ORDER
 
-uint64_t asmg_drop_tip(asmg_t *g, int32_t tip_cnt, uint64_t tip_len, int do_cleanup, int VERBOSE)
+#ifdef DEBUG_EXEC_ORDER
+#include <time.h>
+void shuffle(uint64_t *a, size_t n)
 {
-    uint64_t i, v, n_vtx, cnt, l_ext;
+    while (n > 1) {
+        size_t k = (size_t) ((double)(n--) * (rand() / (RAND_MAX+1.0)));
+        SWAP(a[n], a[k]);
+    }
+}
+#endif
+
+static uint64_t asmg_cwt_len(asmg_t *g, uint64_t *v, uint64_t nv)
+{
+    if (nv == 0) return 0;
+    uint64_t i, wt_l, ov_l;
+    wt_l = g->vtx[v[0]>>1].len * g->vtx[v[0]>>1].cov;
+    for (i = 1; i < nv; ++i) {
+        ov_l = asmg_arc(g, v[i-1], v[i])->ls;
+        wt_l += (g->vtx[v[i]>>1].len - ov_l) * g->vtx[v[i]>>1].cov;
+    }
+    return wt_l;
+}
+
+// super tip: a tip with a coverage larger than [half] the coverage of the vertex it attached to
+uint64_t asmg_drop_tip(asmg_t *g, int32_t tip_cnt, uint64_t tip_len, int protect_super_tip, int do_cleanup, int VERBOSE)
+{
+    uint64_t i, v, w, w1, n1, n_vtx, cnt, b_tip, c_tip, l_ext;
     int32_t vt;
+    int is_tip;
+    asmg_arc_t *a1;
     u64_v_t a = {0, 0, 0};
+    u64_v_t b = {0, 0, 0};
+    u64_v_t d = {0, 0, 0};
     n_vtx = asmg_vtx_n(g);
+    if ((uint64_t) tip_cnt > n_vtx)
+        tip_cnt = n_vtx;
     cnt = 0;
+#ifdef DEBUG_EXEC_ORDER
+    srand((unsigned) time(NULL));
+    uint64_t j, idx[n_vtx];
+    for (v = 0; v < n_vtx; ++v) idx[v] = v;
+    shuffle(idx, n_vtx);
+    for (j = 0; j < n_vtx; ++j) {
+        v = idx[j];
+#else
     for (v = 0; v < n_vtx; ++v) {
+#endif
         if (g->vtx[v>>1].del) continue;
         if (asmg_arc_n1(g, v^1) != 0) continue; // not a tip
-        vt = asmg_uext(g, v, tip_cnt, 0, &l_ext, &a);
+        vt = asmg_uext(g, v, tip_cnt, 0, &l_ext, &a, 1);
+        if (a.n == 0) continue; // v is ASMG_VT_MULTI_OUT
         if (vt == ASMG_VT_MERGEABLE) continue; // circular unitig
         if (l_ext > tip_len) continue; // tip too long
-        for (i = 0; i < a.n; ++i)
-            asmg_vtx_del(g, a.a[i]>>1, 1);
+        if (vt != ASMG_VT_TIP && protect_super_tip) {
+            w = a.a[a.n - 1]; // the last vertex
+            // asmg_arc_n1(g, w) is 0 or 1 by definition of tips
+            // zero for a tip subgraph
+            // assert(asmg_arc_n1(g, w) == 1);
+            b_tip = l_ext;
+            c_tip = asmg_cwt_len(g, a.a, a.n);
+            /***
+            for (i = 0; i < a.n; ++i) {
+                b_tip += g->vtx[a.a[i]>>1].len;
+                c_tip += g->vtx[a.a[i]>>1].len * g->vtx[a.a[i]>>1].cov;
+            }
+            **/
+            // a tip with high coverage
+            // if (c_tip * 2 > b_tip * asmg_arc_a1(g, w)->cov) continue;
+            // compare max coverage neighbour vtx
+            w1 = asmg_arc_a1(g, w)->w ^ 1; // this is the only vtx by definition
+            a1 = asmg_arc_a(g, w1);
+            n1 = asmg_arc_n(g, w1);
+            is_tip = 0;
+            for (i = 0; i < n1; ++i) {
+                if ((a1[i].del || a1[i].w ^ 1) == w) 
+                    continue;
+                asmg_uext(g, a1[i].w, n_vtx + 1, 0, &l_ext, &b, 0);
+                if (b_tip <= l_ext || c_tip * 2 <= asmg_cwt_len(g, b.a, b.n)) {
+                    is_tip = 1;
+                    break;
+                }
+            }
+            if (!is_tip) continue;
+        }
+        kv_pushn(uint64_t, d, a.a, a.n);
         ++cnt;
     }
+    for (i = 0; i < d.n; ++i)
+        asmg_vtx_del(g, d.a[i]>>1, 1);
     free(a.a);
+    free(b.a);
+    free(d.a);
     if (do_cleanup && cnt > 0) asmg_finalize(g, 1);
     if (VERBOSE)
         fprintf(stderr, "[M::%s] dropped %lu tips\n", __func__, cnt);
@@ -554,17 +695,30 @@ static inline uint64_t asmg_arc_n3(asmg_t *g, uint64_t v, uint64_t w, uint32_t *
     return nv;
 }
 
-uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, int VERBOSE)
+uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, double m_cov, int do_cleanup, int VERBOSE)
 {
-    uint64_t i, n, v, w, cnt = 0;
-    uint32_t cv, cw;
-    asmg_arc_t *a;
+    uint64_t i, k, n, n1, v, w, cnt = 0;
+    // uint32_t cv, cw;
+    int weak;
+    asmg_arc_t *a, *a1;
+    u64_v_t d = {0, 0, 0};
 
+#ifdef DEBUG_EXEC_ORDER
+    srand((unsigned) time(NULL));
+    n = g->n_arc;
+    uint64_t j, idx[n];
+    for (j = 0; j < n; ++j) idx[j] = j;
+    shuffle(idx, n);
+    for (j = 0; j < n; ++j) {
+        i = idx[j];
+#else
     for (i = 0, n = g->n_arc; i < n; ++i) {
+#endif
         a = &g->arc[i];
-        if (a->del) continue;
+        if (a->del || a->comp) continue;
         v = a->v;
         w = a->w;
+        /***
         if (asmg_arc_n1(g, v^1) != 1 || asmg_arc_n1(g, w) != 1)
             continue;
         if (asmg_arc_n3(g, v, w, &cv) != 2 || 
@@ -572,11 +726,48 @@ uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, 
             continue;
         cv = MIN(cv, cw);
         if (cv > 0 && (double) a->cov / cv < c_thresh) {
-            a->del = 1;
-            asmg_arc_del(g, w^1, v^1, 1);
+            kv_push(uint64_t, d, i);
             ++cnt;
         }
+        **/
+        
+        // check if dominating outgoing arc exists
+        n1 = asmg_arc_n(g, v);
+        a1 = asmg_arc_a(g, v);
+        weak = 0;
+        for (k = 0; k < n1; ++k) {
+            if (a1[k].del || a1[k].cov < m_cov)
+                continue;
+            if ((double) a->cov / a1[k].cov < c_thresh) {
+                weak = 1;
+                break;
+            }
+        }
+        if (!weak) continue;
+        
+        // check if dominating incoming arc exists
+        n1 = asmg_arc_n(g, w^1);
+        a1 = asmg_arc_a(g, w^1);
+        weak = 0;
+        for (k = 0; k < n1; ++k) {
+            if (a1[k].del || a1[k].cov < m_cov)
+                continue;
+            if ((double) a->cov / a1[k].cov < c_thresh) {
+                weak = 1;
+                break;
+            }
+        }
+        if (!weak) continue;
+
+        kv_push(uint64_t, d, i);
+        ++cnt;
     }
+    for (i = 0, n = d.n; i < n; ++i) {
+        a = &g->arc[d.a[i]];
+        a->del = 1;
+        asmg_arc_del(g, a->w^1, a->v^1, 1);
+    }
+    free(d.a);
     if (do_cleanup && cnt > 0) asmg_finalize(g, 1);
     if (VERBOSE)    
         fprintf(stderr, "[M::%s] dropped %lu weak cross links\n", __func__, cnt);
@@ -588,7 +779,7 @@ uint64_t asmg_remove_weak_crosslink(asmg_t *g, double c_thresh, int do_cleanup, 
  ******************/
 
 // in a resolved bubble, mark unused vertices and arcs as "reduced"
-static void asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, int protect_super_bubble, asmg_tbuf_t *b)
+static int asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, int protect_super_bubble, asmg_tbuf_t *b)
 {
     uint64_t i, v, w;
     asmg_arc_t *a;
@@ -598,16 +789,29 @@ static void asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, int pro
         uint64_t n_kept = 0;
         v = b->v_sink;
         do { ++n_kept, v = b->a[v].p; } while (v != v0);
-        if (b->b.n > n_kept + max_del) return;
+        if (b->b.n > n_kept + max_del) return 0;
     }
     if (protect_super_bubble) {
-        uint64_t n_kept, b_kept, b_tot;
-        n_kept = b_kept = 0;
+        uint64_t n_kept, b_kept, c_kept, b_tot, c_tot;
+        n_kept = b_kept = c_kept = 0;
         v = b->v_sink;
-        do { ++n_kept, b_kept += g->vtx[v>>1].len, v = b->a[v].p; } while (v != v0);
-        b_tot = 0;
-        for (i = 0; i < b->b.n; ++i) b_tot += g->vtx[b->b.a[i]>>1].len;
-        if ((b_tot - b_kept) * 2 > (g->vtx[v0>>1].len + g->vtx[b->v_sink>>1].len) * (b->b.n - n_kept)) return;
+        do { ++n_kept, b_kept += g->vtx[v>>1].len, c_kept += g->vtx[v>>1].len * g->vtx[v>>1].cov, v = b->a[v].p; } while (v != v0);
+        b_tot = c_tot = 0;
+        for (i = 0; i < b->b.n; ++i) b_tot += g->vtx[b->b.a[i]>>1].len, c_tot += g->vtx[b->b.a[i]>>1].len * g->vtx[b->b.a[i]>>1].cov;
+        // check length for super bubble protection: b_delt / n_delt * 2 > b_source + b_sink
+        uint64_t le, re, le_wt, re_wt; // left and right extension 
+        u64_v_t a = {0, 0, 0};
+        le = re = le_wt = re_wt = 0;
+        asmg_uext(g, v0^1,      g->n_vtx*2+1, 0, &le, &a, 0);
+        le_wt = asmg_cwt_len(g, a.a, a.n);
+        asmg_uext(g, b->v_sink, g->n_vtx*2+1, 0, &re, &a, 0);
+        re_wt = asmg_cwt_len(g, a.a, a.n);
+        free(a.a);
+        //if ((b_tot - b_kept) * 2 > (g->vtx[v0>>1].len + g->vtx[b->v_sink>>1].len) * (b->b.n - n_kept)) return 0;
+        // if ((b_tot - b_kept) * 2 > (le + re) * (b->b.n - n_kept)) return 0;
+        if ((c_tot - c_kept) * (le + re) * 2 > (le_wt + re_wt) * (b_tot - b_kept)) return 0;
+        // check coverage for super bubbble protection: c_delt / b_delt * 2 > c_kept / b_kept
+        if ((c_tot - c_kept) * b_kept * 2 > c_kept * (b_tot - b_kept)) return 0;
     }
     for (i = 0; i < b->b.n; ++i)
         g->vtx[b->b.a[i]>>1].del = 1;
@@ -624,6 +828,7 @@ static void asmg_bub_backtrack(asmg_t *g, uint64_t v0, uint64_t max_del, int pro
         asmg_arc_del(g, v^1, w^1, 0);
         v = w;
     } while (v != v0);
+    return 1;
 }
 
 // pop bubbles from vertex v0; the graph MUST BE symmetric: if u->v present, v'->u' must be present as well
@@ -634,16 +839,19 @@ static uint64_t asmg_bub_pop1(asmg_t *g, uint64_t v0, uint64_t radius, uint64_t 
     if (asmg_arc_n1(g, v0) < 2) return 0; // no bubbles
     asmg_topo_ext(g, v0, g->vtx[v0>>1].len + radius, protect_tip? 0 : ASMG_TE_THRU_SHORT_TIP, b);
     if (b->n_sink) {
-        asmg_bub_backtrack(g, v0, max_del, protect_super_bubble, b);
-        ret = 1 | (uint64_t) b->n_short_tip << 32;
+        ret = asmg_bub_backtrack(g, v0, max_del, protect_super_bubble, b);
+        if (ret) ret |= (uint64_t) b->n_short_tip << 32;
     }
     asmg_tbuf_reset(b);
     return ret;
 }
 
 // pop bubbles
-// super bubble: the average length of sequences to be removed is greater than the average length of source and sink sequence
+// super bubble: the average length of sequences to be removed is greater than the average length of source and sink sequence?
+// super bubble: the average coverage of sequences to be removed is greater than [half] the average coverage of source and sink sequence
+// super bubble: the average coverage of sequences to be removed is greater than [half] the average coverage of sequences to be kept
 // super buubles are protected with protect_super_bubble set
+// TODO does vertex traversal order matters? in theory the number of bubbles being processed could be different but the resulted graph should be same
 uint64_t asmg_pop_bubble(asmg_t *g, uint64_t radius, uint64_t max_del, int protect_tip, int protect_super_bubble, int do_cleanup, int VERBOSE)
 {
     uint64_t v, n_vtx, n_pop;
@@ -652,9 +860,20 @@ uint64_t asmg_pop_bubble(asmg_t *g, uint64_t radius, uint64_t max_del, int prote
     n_vtx = asmg_vtx_n(g);
     b = asmg_tbuf_init(g);
     n_pop = 0;
-    for (v = 0; v < n_vtx; ++v)
+
+#ifdef DEBUG_EXEC_ORDER
+    srand((unsigned) time(NULL));
+    uint64_t j, idx[n_vtx];
+    for (j = 0; j < n_vtx; ++j) idx[j] = j;
+    shuffle(idx, n_vtx);
+    for (j = 0; j < n_vtx; ++j) {
+        v = idx[j];
+#else
+    for (v = 0; v < n_vtx; ++v) {
+#endif
         if (!g->vtx[v>>1].del && asmg_arc_n1(g, v) >= 2)
             n_pop += asmg_bub_pop1(g, v, radius, max_del, protect_tip, protect_super_bubble, b);
+    }
     asmg_tbuf_destroy(b);
     if (do_cleanup && n_pop > 0) asmg_finalize(g, 1);
     if (VERBOSE)
@@ -843,7 +1062,8 @@ asmg_t *asmg_unitigging(asmg_t *g)
         kv_pushp(asmg_arc_t, arcs, &arc1);
         arc1->v = utgs.a[v>>1].n>1? v^1 : v|(arc->v&1);
         arc1->w = utgs.a[w>>1].n>1?  w  : w|(arc->w&1);
-        arc1->lo = arc->lo;
+        arc1->ln = arc->ln;
+        arc1->ls = arc->ls;
         arc1->link_id = arc->link_id;
         arc1->cov = arc->cov;
         arc1->del = 0;
@@ -858,7 +1078,7 @@ asmg_t *asmg_unitigging(asmg_t *g)
         u64_v_t v_vec = {0, 0, 0};
         for (j = 0; j < m; ++j) {
             if (j > 0)
-                v_vec.n -= asmg_arc(g, vtx_p[j-1], vtx_p[j])->lo;
+                v_vec.n -= asmg_arc(g, vtx_p[j-1], vtx_p[j])->ln;
             vtx1 = &vtx[vtx_p[j]>>1];
             vec_add(&v_vec, vtx1->a, vtx1->n, !!(vtx_p[j]&1));
         }
@@ -886,13 +1106,15 @@ asmg_t *asmg_unitigging(asmg_t *g)
 
 KDQ_INIT(uint64_t)
 
+typedef kdq_t(uint64_t) kdq_u64_t;
+
 uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step, 
         uint64_t dist, uint32_t *_nv, int modify_graph)
 {
     // make a subgraph from given a vertex set and radius
     // if modify_graph
     //     all vertices and arcs in other components will be marked as deleted
-    //     return NULL
+    //     return 0
     // else
     //     keep graph unchanged
     //     return the list of vertices in the subgraph
@@ -904,8 +1126,8 @@ uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step,
     uint32_t r;
     uint64_t i, v, x, rd, nv;
     int8_t *flag;
-    kdq_t(uint64_t) *q;
-    kdq_t(uint64_t) *d;
+    kdq_u64_t *q;
+    kdq_u64_t *d;
     asmg_arc_t *av;
 
     if (step == 0)
@@ -956,11 +1178,11 @@ uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step,
                 // if (modify_graph) av[i].del = 0;
                 if (flag[av[i].w] == 0) {
                     kdq_push(uint64_t, q, (uint64_t)av[i].w<<32 | (r + 1));
-                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
+                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].ls);
                 }
                 if (flag[av[i].w^1] == 0) {
                     kdq_push(uint64_t, q, (uint64_t)(av[i].w^1)<<32 | (r + 1));
-                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
+                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].ls);
                 }
             }
         }
@@ -971,14 +1193,18 @@ uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step,
     for (i = 0; i < g->n_vtx; ++i)
         flag[i] = (flag[i<<1|0] > 0 || flag[i<<1|1] > 0);
 
-    kvec_t(uint32_t) vlist;
-    kv_init(vlist);
+    uint32_t *vs;
     nv = 0;
+    vs = 0;
     if (!modify_graph) {
         // make vlist
+        kvec_t(uint32_t) vlist;
+        kv_init(vlist);
         for (i = 0; i < g->n_vtx; ++i)
             if (flag[i])
                 kv_push(uint32_t, vlist, i);
+        MYREALLOC(vlist.a, vlist.n);
+        vs = vlist.a;
         nv = vlist.n;
     } else {
         // delete dirty arcs
@@ -991,15 +1217,14 @@ uint32_t *asmg_subgraph(asmg_t *g, uint32_t *seeds, uint32_t n, uint32_t step,
                 nv += flag[i];
         }
     }
-    MYREALLOC(vlist.a, vlist.n);
-
+    
     if (_nv) *_nv = nv;
     
     kdq_destroy(uint64_t, q);
     kdq_destroy(uint64_t, d);
     free(flag);
 
-    return vlist.a;
+    return vs;
 }
 
 int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, uint64_t dist, uint32_t *_step, uint64_t *_dist)
@@ -1015,8 +1240,8 @@ int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, u
     uint32_t i, v, r, nv;
     uint64_t x, rd;
     int8_t *flag;
-    kdq_t(uint64_t) *q;
-    kdq_t(uint64_t) *d;
+    kdq_u64_t *q;
+    kdq_u64_t *d;
     asmg_arc_t *av;
 
     int exists = 0;
@@ -1049,7 +1274,7 @@ int asmg_path_exists(asmg_t *g, uint32_t source, uint32_t sink, uint32_t step, u
                 }
                 if (flag[av[i].w] == 0) {
                     kdq_push(uint64_t, q, (uint64_t)av[i].w<<32 | (r + 1));
-                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].lo);
+                    kdq_push(uint64_t, d, rd + g->vtx[av[i].w>>1].len - av[i].ls);
                 }
             }
         }
@@ -1062,5 +1287,69 @@ do_clean:
     free(flag);
 
     return exists;
+}
+
+static void scc_util(asmg_t *g, uint64_t v, int *disc, int *low, kdq_u64_t *st, int *stb, int *depth, int *scc, int *n_scc)
+{
+    uint64_t i, w, n;
+    asmg_arc_t *a;
+
+    disc[v] = low[v] = ++*depth;
+    kdq_push(uint64_t, st, v);
+    stb[v] = 1;
+
+    a = asmg_arc_a(g, v);
+    n = asmg_arc_n(g, v);
+    for (i = 0; i < n; ++i) {
+        if (a[i].del) continue;
+        w = a[i].w;
+        if (g->vtx[w>>1].del) continue;
+        if (disc[w] == -1) {
+            scc_util(g, w, disc, low, st, stb, depth, scc, n_scc);
+            low[v] = MIN(low[v], low[w]);
+        } else if (stb[w] == 1) {
+            low[v] = MIN(low[v], disc[w]);
+        }
+    }
+    
+    if (low[v] == disc[v]) {
+        do {
+            w = *kdq_pop(uint64_t, st);
+            stb[w] = 0;
+            scc[w] = *n_scc;
+        } while (w != v);
+        ++*n_scc;
+    }
+}
+
+int asmg_tarjans_scc(asmg_t *g, int *scc)
+{
+    uint64_t i, n_seg;
+    int n_scc, depth, *low, *disc, *stb;
+    kdq_u64_t *st;
+
+    n_seg = asmg_vtx_n(g);
+    MYMALLOC(low, n_seg);
+    MYMALLOC(disc, n_seg);
+    MYMALLOC(stb, n_seg);
+    st = kdq_init(uint64_t, 0);
+    for (i = 0; i < n_seg; ++i) {
+        scc[i] = -1;
+        low[i] = -1;
+        disc[i] = -1;
+        stb[i] = 0;
+    }
+    
+    n_scc = depth = 0;
+    for (i = 0; i < n_seg; ++i)
+        if (disc[i] == -1 && !g->vtx[i>>1].del)
+            scc_util(g, i, disc, low, st, stb, &depth, scc, &n_scc);
+
+    free(low);
+    free(disc);
+    free(stb);
+    kdq_destroy(uint64_t, st);
+    
+    return n_scc;
 }
 

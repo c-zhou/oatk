@@ -38,29 +38,36 @@
 
 #include "misc.h"
 #include "sstream.h"
-#include "syncasm.h"
 #include "syncmer.h"
+#include "syncasm.h"
 #include "graph.h"
 #include "version.h"
 
 #undef DEBUG_SYNCMER_SEQ
 #undef DEBUG_SYNCMER_GRAPH
+#undef DEBUG_GRAPH_UNITIG
 #undef DEBUG_GRAPH_MULTIPLEX
 #undef DEBUG_GRAPH_ALIGNMENT
+#undef DEBUG_GRAPH_ERROR_CORRECTION
+
+void read_error_correction(sr_db_t *sr_db, scg_t *g, double max_edist, uint32_t err_mer_c, uint32_t max_err_c,
+        uint32_t err_arc_c, double max_arc_f, int threads, FILE *fo, int verbose);
 
 int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_size, int tip_size, int min_k_cov, double min_a_cov_f,
-        double weak_cross, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE)
+        double weak_cross, int do_ec, int do_unzip, int n_threads, char *out, scg_meta_t *meta, int VERBOSE)
 {
     FILE *fo;
     sstream_t *sr_rdr;
     scg_t *scg;
-    sr_v *sr;
-    scg_ra_v *ra;
+    sr_db_t *sr_db;
+    syncmer_db_t *scm_db;
+    scg_ra_v *ra_db;
     int ret = 0;
 
     scg = 0;
-    sr = 0;
-    ra = 0;
+    sr_db = 0;
+    scm_db = 0;
+    ra_db = 0;
 
     sr_rdr = sstream_open(file_in, n_file);
     if (sr_rdr == 0) {
@@ -69,35 +76,66 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
         goto do_clean;
     }
 
-    MYCALLOC(sr, 1);
-    sr_read(sr_rdr, sr, s, k, m_data, n_threads);
+    MYMALLOC(sr_db, 1);
+    sr_db_init(sr_db, k, s);
+    sr_read(sr_rdr, sr_db, m_data, n_threads);
     fprintf(stderr, "[M::%s] collected syncmers from %lu target sequence(s)\n", __func__, sr_rdr->n_seq);
     sstream_close(sr_rdr);
-    if (sr_validate(sr)) {
+    if (sr_db_validate(sr_db)) {
         ret = 1;
         goto do_clean;
     }
-
-    sr_stat_t *stats;
-    MYCALLOC(stats, 1);
-    sr_stat(sr, stats, k, stderr, VERBOSE);
+    sr_db_stat(sr_db, stderr, VERBOSE);
 
     if (min_k_cov == 0) {
-        min_k_cov = stats->kmer_peak_het > 0? (stats->kmer_peak_het * 10) : (stats->kmer_peak_hom * 10);
+        min_k_cov = sr_db->stats->kmer_peak_het > 0? (sr_db->stats->kmer_peak_het * 10) : (sr_db->stats->kmer_peak_hom * 10);
         fprintf(stderr, "[M::%s] set minimum kmer coverage as %d\n", __func__, min_k_cov);
     }
-    free(stats);
 
 #ifdef DEBUG_SYNCMER_SEQ
     uint32_t i;
     fo = open_outstream(out, "_syncmer_debug.fa");
-    for (i = 0; i < sr->n; ++i) print_all_syncmers_on_seq(&sr->a[i], s, k, fo);
+    for (i = 0; i < sr_db->n; ++i) print_all_syncmers_on_seq(&sr_db->a[i], s, k, fo);
     fclose(fo);
 #endif
 
+    // make syncmer database
+    scm_db = collect_syncmer_from_reads(sr_db);
+    
+    // syncmer_link_coverage_analysis(sr_db, scm_db, min_k_cov, 30, 30, .7, 0, 0, 0, VERBOSE);
+    
+    if (do_ec) {
+        // make syncmer graph with all syncmers for error correction
+        scg = make_syncmer_graph(sr_db, scm_db, 0, 0.);
+#ifdef DEBUG_GRAPH_ERROR_CORRECTION
+        // save sequence in graph
+        fo = open_outstream(out, "_syncmer_hoco.gfa");
+        scg_consensus(sr_db, scg, 1, 1, fo);
+        fclose(fo);
+#endif
+        // do consensus in hoco space
+        scg_consensus(sr_db, scg, 1, 1, 0);
+        // naive error finding without checking arc coverage
+#ifdef DEBUG_GRAPH_ERROR_CORRECTION
+        fo = open_outstream(out, ".ec.fa");
+#else
+        fo = 0;
+#endif
+        read_error_correction(sr_db, scg, 0.02, min_k_cov, min_k_cov * 10, min_k_cov, min_a_cov_f, n_threads, fo, VERBOSE);
+#ifdef DEBUG_GRAPH_ERROR_CORRECTION
+        fclose(fo);
+        fo = open_outstream(out, "_syncmer_hoco.noerr.gfa");
+        scg_print(scg, fo, 0);
+        fclose(fo);
+#endif
+        sr_db_stat(sr_db, stderr, VERBOSE);
+        scg_destroy(scg); scg = 0;
+        // goto do_clean;
+    }
+
     // make syncmer graph
     fprintf(stderr, "[M::%s] make syncmer graph\n", __func__);
-    scg = make_syncmer_graph(sr, min_k_cov, min_a_cov_f);
+    scg = make_syncmer_graph(sr_db, scm_db, min_k_cov, min_a_cov_f);
     if (!scg || scg_is_empty(scg)) {
         fprintf(stderr, "[E::%s] empty syncmer graph\n", __func__);
         ret = 1;
@@ -105,17 +143,17 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
     }
     fprintf(stderr, "[M::%s] syncmer graph stats\n", __func__);
     scg_stat(scg, stderr, 0);
+    if (VERBOSE > 1) scg_subgraph_stat(scg, stderr);
 
 #ifdef DEBUG_SYNCMER_GRAPH
     fo = open_outstream(out, "_syncmer.gfa");
-    scg_consensus(sr, scg, k, 0, 0, fo);
-    asmg_clean_consensus(scg->utg_asmg);
+    scg_consensus(sr_db, scg, 0, 0, fo);
     fclose(fo);
-    MYCALLOC(ra, 1);
-    scg_read_alignment(sr, ra, scg, n_threads, 0);
+    MYCALLOC(ra_db, 1);
+    scg_read_alignment(sr_db, ra_db, scg, n_threads, 0);
     fprintf(stderr, "[DEBUG_SYNCMER_GRAPH::%s] read alignment\n", __func__);
-    scg_rv_print(ra, stderr);
-    scg_ra_v_destroy(ra);
+    scg_rv_print(ra_db, stderr);
+    scg_ra_v_destroy(ra_db);
 #endif
 
     // make unitigs
@@ -123,82 +161,146 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
     process_mergeable_unitigs(scg);
     fprintf(stderr, "[M::%s] syncmer graph stats after unitigging\n", __func__);
     scg_stat(scg, stderr, 0);
-    fo = open_outstream(out, "_utg.gfa");
-    scg_consensus(sr, scg, k, 0, 0, fo);
+    fo = open_outstream(out, ".utg.gfa");
+    scg_consensus(sr_db, scg, 0, 0, fo);
     fclose(fo);
+
+    if (VERBOSE > 1) scg_subgraph_stat(scg, stderr);
+
+#ifdef DEBUG_GRAPH_UNITIG
+    scg_print_unitig_syncmer_list(scg, stderr);
+    MYCALLOC(ra_db, 1);
+    scg_read_alignment(sr_db, ra_db, scg, n_threads, 0);
+    fprintf(stderr, "[DEBUG_GRAPH_UNITIG::%s] read alignment\n", __func__);
+    scg_rv_print(ra_db, stderr);
+    scg_ra_v_destroy(ra_db);
+#endif
 
     // do basic cleanup
     // already have consensus information
-    asmg_drop_tip(scg->utg_asmg, 1, tip_size, 0, VERBOSE);
-    asmg_pop_bubble(scg->utg_asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
-    asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 0, VERBOSE);
-    asmg_clean_consensus(scg->utg_asmg); // need to clean consensus before unitigging
+    fprintf(stderr, "[M::%s] syncmer graph cleanup\n", __func__);
+    uint64_t cleaned = 1;
+    while (cleaned) {
+        // do not do bubble popping before unzipping to avoid removing haplotypes
+        cleaned = 0;
+        if (do_unzip <= 0) {
+            cleaned += asmg_pop_bubble(scg->utg_asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
+            cleaned += asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 10, 0, VERBOSE);
+        }
+        cleaned += asmg_drop_tip(scg->utg_asmg, INT_MAX, tip_size, 1, 0, VERBOSE);
+    }
     process_mergeable_unitigs(scg);
+    
+#ifdef DEBUG_GRAPH_MULTIPLEX
     fprintf(stderr, "[M::%s] syncmer graph stats after cleanup\n", __func__);
     scg_stat(scg, stderr, 0);
-    fo = open_outstream(out, do_unzip? "_utg_clean.gfa" : "_utg_final.gfa");
-    scg_consensus(sr, scg, k, 0, 0, fo);
+    fo = open_outstream(out, ".utg.clean.gfa");
+    scg_consensus(sr_db, scg, 0, 0, fo);
     fclose(fo);
+#endif
 
+#ifdef DEBUG_GRAPH_MULTIPLEX
+    scg_print_unitig_syncmer_list(scg, stderr);
+#endif
+
+    MYCALLOC(ra_db, 1);
     // do read threading
-    MYCALLOC(ra, 1);
-    if (do_unzip) {
+    if (do_unzip > 0) {
         fprintf(stderr, "[M::%s] assembly graph unzipping\n", __func__);
         int round, updated;
         uint32_t max_n_scm;
 
         // set max_n_scm for maximum repeats of ~15Kb which reach the HiFi read length limit
-        max_n_scm = ceil(30000.0/k);
+        max_n_scm = ceil(30000.0 / k);
 
         // do multiplexing
         round = 0;
         updated = 1;
-        asmg_clean_consensus(scg->utg_asmg); // need to clean consensus information
-        while (updated != 0 && round < 10) {
-            scg_read_alignment(sr, ra, scg, n_threads, 1);
+        while (updated != 0 && round < do_unzip) {
+            ++round;
+            scg_read_alignment(sr_db, ra_db, scg, n_threads, 1);
+            // scg_rv_print(ra_db, stderr);
             scg_update_utg_cov(scg);
-            updated = scg_multiplex(scg, ra, max_n_scm, 10, .3);
+            updated = scg_multiplex(scg, ra_db, max_n_scm, 10, .3);
             if (VERBOSE > 0) {
-                fprintf(stderr, "[M::%s] syncmer graph stats after multiplexing round %d\n", __func__, ++round);
+                fprintf(stderr, "[M::%s] syncmer graph stats after multiplexing round %d\n", __func__, round);
                 scg_stat(scg, stderr, 0);
             }
 #ifdef DEBUG_GRAPH_MULTIPLEX
+            char *out1;
+            MYMALLOC(out1, strlen(out) + 36);
+            sprintf(out1, "%s.utg.unzip.r%02d.gfa", out, round);
+            fo = open_outstream(out1, "");
+            scg_consensus(sr_db, scg, 0, 0, fo);
+            fclose(fo);
+            free(out1);
             scg_print_unitig_syncmer_list(scg, stderr);
 #endif
         }
+        
+        // arc coverage estimation from aligned reads
+        // to remove weak cross arcs
+        // only arc coverage is required
+        scg_read_alignment(sr_db, ra_db, scg, n_threads, 1);
+        scg_ra_arc_coverage(scg, sr_db, ra_db, 0, VERBOSE);
+        asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 10, 0, VERBOSE);
+
+#ifdef DEBUG_GRAPH_MULTIPLEX
+        fprintf(stderr, "[M::%s] syncmer graph stats after multiplexing\n", __func__);
+        scg_stat(scg, stderr, 0);
+        fo = open_outstream(out, ".utg.multiplex.gfa");
+        scg_consensus(sr_db, scg, 0, 0, fo);
+        fclose(fo);
+#endif
 
         // do demultiplexing
         scg_demultiplex(scg);
         // the arc coverage is lost
-        scg_arc_coverage(scg, sr);
+        scg_read_alignment(sr_db, ra_db, scg, n_threads, 0);
+        scg_ra_utg_coverage(scg, sr_db, ra_db, VERBOSE);
+        scg_ra_arc_coverage(scg, sr_db, ra_db, 1, VERBOSE);
+        
+#ifdef DEBUG_GRAPH_MULTIPLEX
         fprintf(stderr, "[M::%s] syncmer graph stats after unzipping\n", __func__);
         scg_stat(scg, stderr, 0);
-        fo = open_outstream(out, "_utg_unzip.gfa");
-        scg_consensus(sr, scg, k, 0, 0, fo);
+        fo = open_outstream(out, ".utg.unzip.gfa");
+        scg_consensus(sr_db, scg, 0, 0, fo);
         fclose(fo);
+#else
+        // consensus infomration is required for basic cleanup
+        scg_consensus(sr_db, scg, 0, 0, 0);
+#endif
 
         // do basic cleanup
-        // already have consensus information
-        asmg_drop_tip(scg->utg_asmg, 1, tip_size, 0, VERBOSE);
-        asmg_pop_bubble(scg->utg_asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
-        asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 0, VERBOSE);
-        asmg_clean_consensus(scg->utg_asmg); // need to clean consensus before unitigging
+        cleaned = 1;
+        while (cleaned) {
+            cleaned = 0;
+            cleaned += asmg_pop_bubble(scg->utg_asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
+            cleaned += asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 10, 0, VERBOSE);
+            cleaned += asmg_drop_tip(scg->utg_asmg, INT_MAX, tip_size, 1, 0, VERBOSE);
+        }
         process_mergeable_unitigs(scg);
-        fprintf(stderr, "[M::%s] syncmer graph stats after final cleanup\n", __func__);
-        scg_stat(scg, stderr, 0);
-        // redo unitig and arc coverage estimation
-        scg_read_alignment(sr, ra, scg, n_threads, 0);
-        scg_ra_utg_coverage(scg, sr, ra, VERBOSE);
-        scg_ra_arc_coverage(scg, 1, VERBOSE);
-        fo = open_outstream(out, "_utg_final.gfa");
-        scg_consensus(sr, scg, k, 0, 0, fo);
-        fclose(fo);
+
+#ifdef DEBUG_GRAPH_UNITIG
+        scg_print_unitig_syncmer_list(scg, stderr);
+#endif
 
 #ifdef DEBUG_GRAPH_ALIGNMENT
         fprintf(stderr, "[DEBUG_GRAPH_ALIGNMENT::%s] read alignment\n", __func__);
-        scg_rv_print(ra, stderr);
+        scg_rv_print(ra_db, stderr);
 #endif
     }
+
+    // unitig and arc coverage estimation
+    scg_read_alignment(sr_db, ra_db, scg, n_threads, 0);
+    scg_ra_utg_coverage(scg, sr_db, ra_db, VERBOSE);
+    scg_ra_arc_coverage(scg, sr_db, ra_db, 1, VERBOSE);
+
+    fprintf(stderr, "[M::%s] syncmer graph stats after final processing\n", __func__);
+    scg_stat(scg, stderr, 0);
+    fo = open_outstream(out, ".utg.final.gfa");
+    scg_consensus(sr_db, scg, 0, 0, fo);
+    fclose(fo);
 
 do_clean:
     if (meta) {
@@ -206,12 +308,14 @@ do_clean:
         meta->k = k;
         meta->s = s;
         meta->scg = scg;
-        meta->sr = sr;
-        meta->ra = ra;
+        meta->scm_db = scm_db;
+        meta->sr_db = sr_db;
+        meta->ra_db = ra_db;
     } else {
         scg_destroy(scg);
-        sr_v_destroy(sr);
-        scg_ra_v_destroy(ra);
+        syncmer_db_destroy(scm_db);
+        sr_db_destroy(sr_db);
+        scg_ra_v_destroy(ra_db);
     }
 
     return ret;
@@ -226,8 +330,10 @@ static ko_longopt_t long_options[] = {
     { "max-bubble", ko_required_argument, 301 },
     { "max-tip",    ko_required_argument, 302 },
     { "weak-cross", ko_required_argument, 303 },
-    { "no-unzip",   ko_no_argument,       304 },
+    { "unzip-round",ko_required_argument, 304 },
+    { "no-read-ec", ko_no_argument,       305 },
     { "threads",    ko_required_argument, 't' },
+    { "verbose",    ko_required_argument, 'v' },
     { "version",    ko_no_argument,       'V' },
     { "help",       ko_no_argument,       'h' },
     { 0, 0, 0 }
@@ -237,10 +343,11 @@ int main(int argc, char *argv[])
 {
     const char *opt_str = "k:s:c:a:D:t:v:o:Vh";
     ketopt_t opt = KETOPT_INIT;
-    int c, k, s, bubble_size, tip_size, do_unzip, min_k_cov, n_threads;
+    int c, k, s, bubble_size, tip_size, min_k_cov, n_threads;
     size_t m_data;
     double min_a_cov_f, weak_cross;
     char *out;
+    int do_ec, do_unzip;
     FILE *fp_help = stderr;
     int ret = 0;
 
@@ -251,11 +358,12 @@ int main(int argc, char *argv[])
     min_k_cov = 3;
     min_a_cov_f = .35;
     n_threads = 1;
-    do_unzip = 1;
     bubble_size = 100000;
     tip_size = 10000;
     weak_cross = 0.3;
     m_data = 0;
+    do_ec = 1;
+    do_unzip = 3;
     out = "syncasm.asm";
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >= 0) {
@@ -274,7 +382,8 @@ int main(int argc, char *argv[])
         else if (c == 301) bubble_size = atoi(opt.arg);
         else if (c == 302) tip_size = atoi(opt.arg);
         else if (c == 303) weak_cross = atof(opt.arg);
-        else if (c == 304) do_unzip = 0;
+        else if (c == 304) do_unzip = atoi(opt.arg);
+        else if (c == 305) do_ec = 0;
         else if (c == 'o') {
             if (strcmp(opt.arg, "-") != 0)
                 out = opt.arg;
@@ -296,6 +405,7 @@ int main(int argc, char *argv[])
     }
 
     if (argc == opt.ind || fp_help == stdout) {
+        fprintf(fp_help, "\n");
         fprintf(fp_help, "Usage: syncasm [options] <target.fa[stq][.gz]> [...]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -k INT               kmer size [%d]\n", k);
@@ -305,17 +415,19 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -D INT               maximum amount of data to use; suffix K/M/G recognized [%lu]\n", m_data);
         fprintf(fp_help, "    -t INT               number of threads [%d]\n", n_threads);
         fprintf(fp_help, "    -o FILE              prefix of output files [%s]\n", out);
-        fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
-        fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);
-        fprintf(fp_help, "    --weak-cross FLOAT   maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
-        fprintf(fp_help, "    --no-unzip           do not run assembly graph unzipping\n");
+        fprintf(fp_help, "    --max-bubble  INT    maximum bubble size for assembly graph clean [%d]\n", bubble_size);
+        fprintf(fp_help, "    --max-tip     INT    maximum tip size for assembly graph clean [%d]\n", tip_size);
+        fprintf(fp_help, "    --weak-cross  FLOAT  maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
+        fprintf(fp_help, "    --unzip-round INT    maximum round of assembly graph unzipping [%d]\n", do_unzip);
+        fprintf(fp_help, "    --no-read-ec         do not do read error correction\n");
         fprintf(fp_help, "    -v INT               verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --version            show version number\n");
-        fprintf(fp_help, "Example: ./syncasm -k 1001 -c 50 -t 8 -o syncasm.asm hifi.fa.gz\n");
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Example: ./syncasm -k 1001 -c 50 -t 8 -o syncasm.asm hifi.fa.gz\n\n");
         return fp_help == stdout? 0 : 1;
     }
 
-    ret = syncasm(argv + opt.ind, argc - opt.ind, m_data, k, s, bubble_size, tip_size, min_k_cov, min_a_cov_f, weak_cross, do_unzip, n_threads, out, 0, VERBOSE);
+    ret = syncasm(argv + opt.ind, argc - opt.ind, m_data, k, s, bubble_size, tip_size, min_k_cov, min_a_cov_f, weak_cross, do_ec, do_unzip, n_threads, out, 0, VERBOSE);
 
     if (ret) {
         fprintf(stderr, "[E::%s] failed to constrcut assembly\n", __func__);

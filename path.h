@@ -50,9 +50,10 @@ extern char TAG_SBP_COV[4]; // seq total base coverage
 // if the graph size is larger than COMMON_MAX_PLTD_SIZE, the sequence is likely mito
 // size will only include one copy of IR
 static const uint32_t COMMON_MAX_PLTD_SIZE = 200000;
+static const uint32_t COMMON_AVG_PLTD_SIZE = 160000;
 static const uint32_t COMMON_MIN_PLTD_SIZE =  80000;
-// pltd to mito score fold threshold to mark graph as plat without considering other conditions
-static const double PLTD_TO_MITO_FST = 5.0;
+// pltd to mito score fold difference threshold to consider change organelle type annotation
+static const double PLTD_TO_MITO_FST[2] = {2.0, 4.0};
 // common max size of minicircles
 static const uint32_t COMMON_MAX_MINICIRCLE_SIZE = 50000;
 
@@ -86,14 +87,15 @@ typedef struct {
 typedef struct {size_t n, m; path_t *a;} path_v;
 
 typedef struct {
-    uint8_t type; // og type
+    OG_TYPE_t type; // og type
     double score; // annotation score (top 'n_core' genes for each seg)
     double sscore; // secondary annotation score
     uint32_t len; // total length of segs
     uint32_t nv; // number of segs
     uint32_t *v; // seg ids
-    uint32_t ng; // number of genes (controlled by 'no_trn', 'max_eval')
+    uint32_t ng; // number of genes (controlled by 'no_trn', 'no_rrn', 'max_eval')
     uint64_t *g; // sorted list of genes (best hit) gid << 32 | score
+    asmg_t *asmg; // assembly graph
 } og_component_t;
 
 typedef struct {size_t n, m; og_component_t *a; } og_component_v;
@@ -110,32 +112,42 @@ asg_t *asg_make_copy(asg_t *g);
 asmg_t *asg_make_asmg_copy(asmg_t *g, asmg_t *_g);
 uint32_t asg_add_seg(asg_t *g, char *name, int allow_dups);
 uint32_t asg_add_seg1(asg_t *g, char *name, char *seq, uint32_t len, uint64_t cov, int allow_dups);
+uint64_t asg_seg_len(asg_t *g);
+char **asg_vtx_name_list(asg_t *g, uint64_t *_n);
 void asg_stat(asg_t *asg, FILE *fo);
 void asg_print(asg_t *g, FILE *fo, int no_seq);
 void asg_print_fa(asg_t *g, FILE *fo, int line_wd);
 
 void path_destroy(path_t *path);
 void path_v_destroy(path_v *path);
-double estimate_sequence_copy_number_from_coverage(asg_t *asg, int *copy_number, double min_cf, int min_copy, int max_copy);
-int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, int *copy_number, int max_copy);
+double graph_sequence_coverage_precise(asg_t *asg, double min_cf, int min_copy, int max_copy, int **copy_number);
+int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, double seq_coverage, double *_adjusted_cov, int *copy_number, int max_copy, int max_round);
 kh_u32_t *sequence_duplication_by_copy_number(asg_t *asg, int *copy_number, int allow_del);
-void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths);
+void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, double sub_circ_minf, int is_pltd);
 path_t make_path_from_str(asg_t *asg, char *path_str, char *sid);
 void path_sort(path_v *paths);
-void path_rotate(asg_t *g, path_t *path, hmm_annot_v *annots, uint8_t og_type);
+void path_rotate(asg_t *g, path_t *path, hmm_annot_db_t *annots, OG_TYPE_t og_type);
 void path_stats(asg_t *asg, path_v *paths, FILE *fo);
-uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq_cf, int seq_id, int cmp_coeff);
+uint32_t select_best_seq(asg_t *g, path_v *paths, FILE *fo, int type, double seq_cf, int seq_id, int is_pltd);
 void print_seq(asg_t *asg, path_t *path, FILE *fo, int id, int force_linear, int line_wd, int gap_size);
 void print_all_best_seqs(asg_t *g, path_v *paths, FILE *fo);
 int is_valid_gfa_tag(const char *tag);
 double sequence_covered_by_path(asg_t *asg, path_t *path, uint32_t len);
 int clean_graph_by_sequence_coverage(asg_t *asg, double min_cf, int max_copy, int verbose);
+void path_add_hmm_annot_bed6(hmm_annot_bed6_db_t *bed_annots, hmm_annot_db_t *annot_db, asg_t *asg, path_t *path, int id, 
+        int force_linear, int gap_size, OG_TYPE_t og_type, double max_evalue);
 
 void og_component_destroy(og_component_t *og_component);
 void og_component_v_destroy(og_component_v *component_v);
-og_component_v *annot_seq_og_type(hmm_annot_v *annot_v, asg_t *asg, int no_trn, double max_eval, 
-        int n_core, int min_len, int min_score, double **_annot_score, int verbose);
-void print_og_classification_summary(asg_t *asg, hmm_annot_v *annot_v, og_component_v *og_components, FILE *fo);
+double *get_sequence_annot_score(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
+        int n_core, int verbose);
+og_component_v *annot_sequence_og_type(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
+        int n_core, int min_len, int min_score, int fix_og, int verbose);
+og_component_v *annot_subgraph_og_type(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval, 
+        int n_core, int min_len, int min_score, int fix_og, int verbose);
+og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
+        int n_core, int min_len, int min_score, int fix_og, int verbose);
+void print_og_classification_summary(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components, FILE *fo);
 
 #ifdef __cplusplus
 }

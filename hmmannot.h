@@ -45,10 +45,14 @@ static const char *const athaliana_pltd_g71[] = {
     "rps15"
 };
 
-#define OG_UNCLASSIFIED 0
-#define OG_MITO 1
-#define OG_PLTD 2
-#define OG_MINI 3
+typedef enum organelle_type {
+    OG_UNCLASSIFIED = 0,
+    OG_MITO = 1,
+    OG_PLTD = 2,
+    OG_MINI = 3
+} OG_TYPE_t;
+
+#define MAX_BED_SCORE 1000
 
 static const char *const OG_TYPES[] = {"unclassified", "mito", "pltd", "mini"};
 
@@ -57,23 +61,72 @@ typedef struct {
     char *gname, *sname;
     uint32_t hmmfrom, hmmto, alifrom, alito, envfrom, envto, modlen;
     double evalue, score, bias;
-    uint32_t gid:27, og_type:2, trn:1, core:1, del:1;
-    uint64_t sid:63, strand:1;
+    uint32_t gid:29, og_type:2, strand:1, sid;
 } hmm_annot_t;
 
-typedef struct {size_t n, m; hmm_annot_t *a; void *h_names; char **dict; } hmm_annot_v;
+typedef enum {
+    ORDER_UNKNOWN  =-1,
+    ORDER_UNSORTED = 0,
+    ORDER_GNAME    = 1, // key order: gname
+    ORDER_GID      = 2, // key order: gid
+    ORDER_SNAME    = 3, // key order: sname
+    ORDER_SID      = 4, // key order: sid
+    ORDER_SID_OG   = 5, // key order: sid - og_type - gid - score
+    ORDER_SID_CO   = 6  // key order: sid - alifrom - alito
+} hmm_annot_so_t;
+
+typedef struct {
+    size_t n, m; 
+    hmm_annot_t *a;
+    uint32_t n_gene, n_seg;
+    char **gnames; // gene names
+    char **snames; // seg names
+    void *h_gnames; // gene name index map
+    void *h_snames; // seg name index map
+    hmm_annot_so_t so;
+    uint32_t n_idx;  // index size: n_gene or n_seg
+    uint64_t *index; // index for the first key
+} hmm_annot_db_t;
+
+typedef struct {
+    char *sname, *gname, strand;
+    uint32_t alifrom, alito;
+    int score;
+} hmm_annot_bed6_t;
+
+typedef struct { 
+    size_t n, m; 
+    hmm_annot_bed6_t *a; 
+    size_t n_seg, m_seg; 
+    char **snames; // seg name dictionary
+} hmm_annot_bed6_db_t;
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void hmm_annot_destroy(hmm_annot_t *hmm_annot);
-void hmm_annot_v_destroy(hmm_annot_v *annot_v);
-hmm_annot_v *hmm_annot_read(char *annot_file, hmm_annot_v *annot_v, uint8_t og_type);
+void hmm_annot_db_destroy(hmm_annot_db_t *annot_db);
+hmm_annot_db_t *hmm_annot_read(char *annot_file, hmm_annot_db_t *annot_db, OG_TYPE_t og_type);
+void hmm_annot_db_sort(hmm_annot_db_t *annot_db, hmm_annot_so_t so);
 int is_trn(hmm_annot_t *annot);
-void hmm_annot_index(hmm_annot_v *annot_v);
-uint32_t hmm_annot_name2id(hmm_annot_v *annot_v, char *gname);
+int is_rrn(hmm_annot_t *annot);
+hmm_annot_t *hmm_annot_db_index_query(hmm_annot_db_t *annot_db, uint32_t id, uint32_t *n);
+hmm_annot_t *hmm_annot_db_sname_query(hmm_annot_db_t *annot_db, char *sname, uint32_t *n);
+hmm_annot_t *hmm_annot_db_gname_query(hmm_annot_db_t *annot_db, char *gname, uint32_t *n);
+uint32_t hmm_annot_gname2id(hmm_annot_db_t *annot_db, char *gname);
+uint32_t hmm_annot_sname2id(hmm_annot_db_t *annot_db, char *sname);
 void hmm_annot_print(hmm_annot_t *hmm_annot, size_t n, FILE *fo);
+void hmm_annot_db_print(hmm_annot_db_t *annot_db, FILE *fo);
+void hmm_annot_formatted_print_index_list(hmm_annot_db_t *annot_db, uint64_t *index_list, size_t n, 
+        FILE *fo, OG_TYPE_t og_type, double max_evalue, int header);
+void hmm_annot_formatted_print_sname_list(hmm_annot_db_t *annot_db, char **sname_list, size_t n,
+        FILE *fo, OG_TYPE_t og_type, double max_evalue, int header);
+void hmm_annot_print_bed6(hmm_annot_bed6_db_t *annots, FILE *fo, int header);
+void hmm_annot_bed6_sname_add(hmm_annot_bed6_db_t *annots, hmm_annot_db_t *annot_db, char *cname, 
+        char *sname, uint32_t len, uint32_t beg, int rev,
+        uint32_t offset, OG_TYPE_t og_type, double max_evalue);
+hmm_annot_bed6_db_t *hmm_annot_bed6_db_init();
+void hmm_annot_bed6_db_destroy(hmm_annot_bed6_db_t *annot_db);
 
 #ifdef __cplusplus
 }

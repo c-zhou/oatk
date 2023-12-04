@@ -36,6 +36,10 @@
 #include "graph.h"
 
 #define scg_utg_t asmg_vtx_t
+#define scg_n_scm(g) ((g)->scm_db->n)
+#define scg_a_scm(g) ((g)->scm_db->a)
+#define scg_n_vtx(g) ((g)->utg_asmg->n_vtx)
+#define scg_a_vtx(g) ((g)->utg_asmg->vtx)
 
 #define scm_utg_pos(u) ((uint64_t)((u)&0xFFFFFFFFFULL))
 #define scm_utg_uid(u) ((uint64_t)(((u)>>36)&0x3FFFFFFFFFFULL))
@@ -45,10 +49,7 @@
 #define scm_utg_n(g, s) (((g)->idx_u[(s)+1])-((g)->idx_u[(s)]))
 
 typedef struct {
-    /*** syncmer graph ***/
-    uint64_t m_scm, n_scm;
-    syncmer_t *scm;
-    void *h_scm; // scm to id map
+    syncmer_db_t *scm_db; // a shallow copy - never free
     /*** unitig graph ***/
     asmg_t *utg_asmg;
     /*** auxilliary information ***/
@@ -58,8 +59,6 @@ typedef struct {
     // of size n_scm + 1
     // idx_u[n_scm] - idx_u[0] is the size of scm_u
     uint128_t **idx_u;
-    // a clone will reuse scm array and h_scm map
-    bool clone;
 } scg_t;
 
 // read alignment to syncmer graph
@@ -83,8 +82,9 @@ typedef struct {size_t n, m; scg_ra_t *a;} scg_ra_v;
 typedef struct {
     int k, s;
     scg_t *scg;
-    sr_v *sr;
-    scg_ra_v *ra;
+    syncmer_db_t *scm_db;
+    sr_db_t *sr_db;
+    scg_ra_v *ra_db;
 } scg_meta_t;
 
 #ifdef __cplusplus
@@ -92,24 +92,25 @@ extern "C" {
 #endif
 
 void scg_destroy(scg_t *g);
-scg_t *make_syncmer_graph(sr_v *sr, uint32_t min_k_cov, double min_a_cov_f);
-scg_t *scg_clone(scg_t *scg);
-uint64_t scg_get_scm_id(scg_t *g, uint128_t key);
-void scg_arc_coverage(scg_t *scg, sr_v *sr);
+scg_t *make_syncmer_graph(sr_db_t *sr_db, syncmer_db_t *scm_db, uint32_t min_k_cov, double min_a_cov_f);
+void scg_arc_coverage(scg_t *scg, sr_db_t *sr_db);
 void process_mergeable_unitigs(scg_t *g);
 int scg_is_empty(scg_t *scg);
 void scg_stat(scg_t *scg, FILE *fo, uint64_t *stats);
-void scg_consensus(sr_v *sr, scg_t *scg, int w, int hoco_seq, int save_seq, FILE *fo);
+void scg_subgraph_stat(scg_t *scg, FILE *fo);
+void scg_consensus(sr_db_t *sr_db, scg_t *scg, int hoco_seq, int save_seq, FILE *fo);
 void scg_update_utg_cov(scg_t *scg);
+void scg_print(scg_t *g, FILE *fo, int no_seq);
 void scg_print_unitig_syncmer_list(scg_t *g, FILE *fo);
-int64_t scg_syncmer_consensus(sr_v *sr, syncmer_t *scm, int rev, int64_t beg, int w, kstring_t *c_seq, int hoco_seq);
-int64_t scg_unitig_consensus(sr_v *sr, scg_utg_t *utg, syncmer_t *scm, int w, kstring_t *c_seq, int hoco_seq);
+int64_t scg_syncmer_consensus(sr_db_t *sr_db, syncmer_t *scm, int rev, int64_t beg, kstring_t *c_seq, int hoco_seq);
+int64_t scg_unitig_consensus(sr_db_t *sr_db, uint64_t *v, uint64_t n, syncmer_t *scm, kstring_t *c_seq, int hoco_seq);
 int scg_multiplex(scg_t *g, scg_ra_v *ra_v, uint32_t max_n_scm, double min_n_r, double min_d_f);
 void scg_demultiplex(scg_t *g);
 void scg_ra_v_destroy(scg_ra_v *ra_v);
-void scg_read_alignment(sr_v *sr, scg_ra_v *ra_v, scg_t *g, int n_threads, int for_unzip);
-void scg_ra_utg_coverage(scg_t *g, sr_v *sr_v, scg_ra_v *ra_v, int verbose);
-void scg_ra_arc_coverage(scg_t *g, int fix, int verbose);
+void scg_read_alignment(sr_db_t *sr_db, scg_ra_v *ra_v, scg_t *g, int n_threads, int for_unzip);
+void scg_ra_utg_coverage(scg_t *g, sr_db_t *sr_db, scg_ra_v *ra_v, int verbose);
+void scg_ra_arc_coverage(scg_t *g, sr_db_t *sr_db, scg_ra_v *ra_v, int refine, int verbose);
+void scg_refine_arc_coverage(scg_t *g, int verbose);
 void scg_ra_print(scg_ra_t *ra, FILE *fo);
 void scg_rv_print(scg_ra_v *rv, FILE *fo);
 void scg_meta_clean(scg_meta_t *meta);

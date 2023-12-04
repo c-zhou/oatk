@@ -43,9 +43,10 @@ KSTREAM_INIT(gzFile, gzread, 65536)
 int VERBOSE = 0;
 
 static ko_longopt_t long_options[] = {
-    { "linear",  ko_no_argument, 301 },
-    { "version", ko_no_argument, 'V' },
-    { "help",    ko_no_argument, 'h' },
+    { "linear",  ko_no_argument,       301 },
+    { "verbose", ko_required_argument, 'v' },
+    { "version", ko_no_argument,       'V' },
+    { "help",    ko_no_argument,       'h' },
     { 0, 0, 0 }
 };
 
@@ -95,6 +96,7 @@ int main(int argc, char *argv[])
     }
     
     if (argc == opt.ind || fp_help == stdout) {
+        fprintf(fp_help, "\n");
         fprintf(fp_help, "Usage: path_to_fasta [options] <file>[.gfa[.gz]] [path_str]\n");
         fprintf(fp_help, "Options:\n");
         fprintf(fp_help, "    -p STR        two-column path file\n");
@@ -105,7 +107,8 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -v INT        verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --linear      force linear output\n");
         fprintf(fp_help, "    --version     show version number\n");
-        fprintf(fp_help, "Example: ./path_to_fasta asm.gfa u1+,u2-,u3-,u2+\n");
+        fprintf(fp_help, "\n");
+        fprintf(fp_help, "Example: ./path_to_fasta asm.gfa u1+,u2-,u3-,u2+\n\n");
         return fp_help == stdout? 0 : 1;
     }
 
@@ -192,7 +195,7 @@ int main(int argc, char *argv[])
 
     size_t i;
     for (i = 0; i < paths.n; ++i)
-        print_seq(g, &paths.a[i], out_seqs? out_seqs : stdout, i, force_linear, line_width, gap_size);
+        print_seq(g, &paths.a[i], out_seqs? out_seqs : stdout, i+1, force_linear, line_width, gap_size);
     
     for (i = 0; i < paths.n; ++i)
         path_destroy(&paths.a[i]);
