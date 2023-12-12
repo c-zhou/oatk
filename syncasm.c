@@ -222,7 +222,7 @@ scg_t *make_syncmer_graph(sr_db_t *sr_db, syncmer_db_t *scm_db, uint32_t min_k_c
     MYCALLOC(vtx, n_scm);
     for (i = 0; i < n_scm; ++i) {
         // filter by kmer coverage
-        scm[i].del = scm[i].cov < min_k_cov;
+        scm[i].del |= scm[i].cov < min_k_cov;
         vtx1 = &vtx[i];
         MYMALLOC(vtx1->a, 1);
         vtx1->n = 1;
@@ -911,9 +911,9 @@ int64_t scg_syncmer_consensus(sr_db_t *sr_db, syncmer_t *scm, int rev, int64_t b
     for (i = 0; i < n_seq; ++i) {
         s = &sr_db->a[m_pos[i]>>32];
         p = m_pos[i]>>1&MAX_RD_SCM;
-        if (s->k_mer[p]&1) continue;
+        if (s->k_mer[p]&1)
+            continue;
         // not error corrected
-        // FIXME is it possible all error corrected?
         p = s->m_pos[p];
         r = (p&1)^rev;
         p >>= 1;
@@ -947,12 +947,7 @@ int64_t scg_syncmer_consensus(sr_db_t *sr_db, syncmer_t *scm, int rev, int64_t b
         s = &sr_db->a[m_pos[i]>>32];
         p = m_pos[i]>>1&MAX_RD_SCM;
         // skip error corrected mers
-        // FIXME
-        // however if all corrected mers
-        // the last mer will be used
-        // m_seq > 0 guaranteed
-        if ((s->k_mer[p] & 1) && 
-                (i != n_seq - 1 || m_seq > 0))
+        if (s->k_mer[p] & 1) 
             continue;
         p = s->m_pos[p];
         r = (p&1)^rev;
@@ -1188,6 +1183,12 @@ int scg_multiplex(scg_t *g, scg_ra_v *ra_v, uint32_t max_n_scm, double min_n_r, 
         // singletons
         if (n_in1 == 0 && n_out1 == 0) {
             multi_vtx[i] = 2;
+            continue;
+        }
+
+        // incoming or outgoing only
+        if (n_in1 == 0 || n_out1 == 0) {
+            multi_vtx[i] = 0;
             continue;
         }
         

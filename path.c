@@ -2433,8 +2433,10 @@ static inline int gfa_parse_S(asg_t *g, char *s)
                 s->cov = len > 0? dv/len : dv;
             }
         }
-        if (s->cov == 0)
+        if (s->cov == 0) {
             fprintf(stderr, "[W::%s] the coverage of segment '%s' is zero\n", __func__, seg);
+            s->cov = 1;
+        }
         free(aux);
     } else return PARSE_S_ERR;
 
@@ -2519,7 +2521,11 @@ static int gfa_parse_L(asg_t *g, char *s)
                 s_ARC_COV = gfa_aux_get(l_aux, aux, "EC");
                 if (s_ARC_COV && *s_ARC_COV == 'i')
                     arc->cov = *(int64_t*)(s_ARC_COV + 1);
-            }        
+            }
+        }
+        if (arc->cov == 0) {
+            fprintf(stderr, "[W::%s] the coverage of arc '%s%c' -> '%s%c' is zero\n", __func__, segv, "+-"[oriv], segw, "+-"[oriw]);
+            arc->cov = 1;
         }
         free(aux);
     } else return PARSE_L_ERR;
@@ -3523,10 +3529,17 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
     max_cov = MAX(max_cov, c_mean * 2.5);
     
     // do graph slimming
-    if (verbose > 1)
+    if (verbose > 1) {
         fprintf(stderr, "[M::%s] subgraph slimming for organelle [%s] against [%s] with sequence coverage %.3f - %.3f\n", 
                 __func__, OG_TYPES[og_target], OG_TYPES[og_contam], min_cov, max_cov);
-    
+        if (verbose > 2) {
+            asmg_t *g = asg->asmg;
+            asg->asmg = asmg;
+            asg_print(asg, stderr, 1);
+            asg->asmg = g;
+        }
+    }
+
     // collect sequences in target cluster
     MYCALLOC(clust_v, nv);
     for (i = 0; i < n_clust; ++i) {
@@ -3588,59 +3601,70 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
     **/
     
     // here is an improved strategy
-    // bring a repeat sequence back if both ends connect to a non-deleted non-repeat
+    // bring a repeat sequence back if both ends connect to a sequence
     // through a path of all repeats
     // and the distance is no greater than max_r_len
-    int *dist, *flag;
+    // repeat this process until no sequence is added
+    int recall, max_r, *dist, *flag;
     kdq_u64_t *q;
 
-    MYCALLOC(dist, n_vtx << 1);
+    MYMALLOC(dist, n_vtx << 1);
     MYMALLOC(flag, n_vtx << 1);
     q = kdq_init(uint64_t, 0);
-    for (i = 0; i < nv; ++i) {
-        if (dels[comp_v[i]] ||
-                asmg->vtx[comp_v[i]].len <= max_r_len)
-            // skip dels and short sequences/repeats
-            continue;
-        for (k = 0; k < 2; ++k) {
-            uint64_t source = comp_v[i] << 1 | k;
-            // find all reachable repeats from 'source'
-            MYBZERO(flag, n_vtx << 1);
-            kdq_push(uint64_t, q, source << 32 | 0);
-            while (kdq_size(q) > 0) {
-                uint64_t x = *kdq_shift(uint64_t, q);
-                v = x >> 32;
-                r = (uint32_t) x;
-                flag[v] = 1;
-                dist[v] = source << 1 | 1;
-                av = asmg_arc_a(asmg, v);
-                na = asmg_arc_n(asmg, v);
-                for (j = 0; j < na; ++j) {
-                    if (av[j].del)
-                        continue;
-                    w = av[j].w;
-                    if (!flag[w] && 
-                            r <= av[j].ls + max_r_len && 
-                            asmg->vtx[w>>1].len <= max_r_len)
-                        // add non-visited repeats
-                        kdq_push(uint64_t, q, (uint64_t) w << 32 | (r + asmg->vtx[w>>1].len - av[j].ls));
+    while (1) {
+        MYBZERO(dist, n_vtx << 1);
+        for (i = 0; i < nv; ++i) {
+            if (dels[comp_v[i]])
+                // skip dels
+                continue;
+            // the maximum distance to radiate
+            max_r = asmg->vtx[comp_v[i]].len;
+            if (max_r > max_r_len)
+                max_r = max_r_len;
+            for (k = 0; k < 2; ++k) {
+                uint64_t source = comp_v[i] << 1 | k;
+                // find all reachable repeats from 'source'
+                MYBZERO(flag, n_vtx << 1);
+                kdq_push(uint64_t, q, source << 32 | 0);
+                while (kdq_size(q) > 0) {
+                    uint64_t x = *kdq_shift(uint64_t, q);
+                    v = x >> 32;
+                    r = (uint32_t) x;
+                    flag[v] = 1;
+                    dist[v] = source << 1 | 1;
+                    av = asmg_arc_a(asmg, v);
+                    na = asmg_arc_n(asmg, v);
+                    for (j = 0; j < na; ++j) {
+                        if (av[j].del)
+                            continue;
+                        w = av[j].w;
+                        if (!flag[w] &&
+                                r <= av[j].ls + max_r &&
+                                asmg->vtx[w>>1].len <= max_r)
+                            // add non-visited repeats
+                            kdq_push(uint64_t, q, (uint64_t) w << 32 | (r + asmg->vtx[w>>1].len - av[j].ls));
+                    }
                 }
             }
         }
-    }
-    for (i = 0; i < nv; ++i) {
-        v = comp_v[i];
-        if (dels[v] && 
-                asmg->vtx[v].len <= max_r_len &&
-                dist[v<<1] &&
-                dist[v<<1 | 1]) {
-            dels[v] = 0;
-            if (verbose > 2)
-                fprintf(stderr, "[M::%s] recall repeat %s: %s%c <-> %s%c\n", __func__, 
-                        asg->seg[v].name,
-                        asg->seg[dist[v<<1]>>2].name, "+-"[(dist[v<<1]>>1)&1], 
-                        asg->seg[dist[v<<1|1]>>2].name, "+-"[(dist[v<<1|1]>>1)&1]);
+
+        recall = 0;
+        for (i = 0; i < nv; ++i) {
+            v = comp_v[i];
+            if (dels[v] &&
+                    asmg->vtx[v].len <= max_r_len &&
+                    dist[v<<1] &&
+                    dist[v<<1 | 1]) {
+                dels[v] = 0;
+                ++recall;
+                if (verbose > 2)
+                    fprintf(stderr, "[M::%s] recall repeat %s: %s%c <-> %s%c\n", __func__,
+                            asg->seg[v].name,
+                            asg->seg[dist[v<<1]>>2].name, "+-"[(dist[v<<1]>>1)&1],
+                            asg->seg[dist[v<<1|1]>>2].name, "+-"[(dist[v<<1|1]>>1)&1]);
+            }
         }
+        if (!recall) break;
     }
     free(dist);
     free(flag);
@@ -3650,6 +3674,13 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
         v = comp_v[i];
         if (dels[v])
             asmg_vtx_del(asmg, v, 1);
+    }
+
+    if (verbose > 2) {
+        asmg_t *g = asg->asmg;
+        asg->asmg = asmg;
+        asg_print(asg, stderr, 1);
+        asg->asmg = g;
     }
 
     uint64_t cleaned = 1;

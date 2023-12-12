@@ -771,7 +771,7 @@ static void update_syncmer_db(sr_db_t *sr_db, syncmer_db_t *scm_db)
     uint64_t i, j, k, n, m;
     syncmer_t *scms;
     uint64_t *k_mer, sid;
-    uint32_t *m_pos;
+    uint32_t *m_pos, *c_cov;
     // clean scm_db
     free(scm_db->c); scm_db->c = 0;
     free(scm_db->h); scm_db->h = 0;
@@ -792,6 +792,7 @@ static void update_syncmer_db(sr_db_t *sr_db, syncmer_db_t *scm_db)
         scms[i].cov = 0;
     }
     // collect syncmer positions on reads
+    MYCALLOC(c_cov, scm_db->n);
     for (i = 0, n = sr_db->n; i < n; ++i) {
         sid = sr_db->a[i].sid;
         k_mer = sr_db->a[i].k_mer;
@@ -799,11 +800,17 @@ static void update_syncmer_db(sr_db_t *sr_db, syncmer_db_t *scm_db)
         for (j = 0, m = sr_db->a[i].n; j < m; ++j) {
             k = k_mer[j] >> 1;
             scms[k].m_pos[scms[k].cov++] = (sid << 32) | (j << 1) | (m_pos[j] & 1);
+            if(!(m_pos[j] & 1)) ++c_cov[k];
         }
     }
     // mark syncmers with no coverage as deleted
+    // this is necessay as there due to the corner case 
+    // for a good syncmer, all copies were error-corrected to others
+    // meanwhile other syncmers were error-corrected to become it
+    // FIXME the simple solution here is to delete this syncmer
     for (i = 0, n = scm_db->n; i < n; ++i)
-        scms[i].del = !scms[i].cov;
+        scms[i].del = !c_cov[i];
+    free(c_cov);
 }
 
 // read error correction in hoco space by aligning to the syncmer graph

@@ -90,6 +90,9 @@ static ko_longopt_t long_options[] = {
     { "include-trn",    ko_no_argument,       310 },
     { "include-rrn",    ko_no_argument,       311 },
     { "no-graph-clean", ko_no_argument,       312 },
+    { "edge-c-tag",     ko_required_argument, 313 },
+    { "kmer-c-tag",     ko_required_argument, 314 },
+    { "seq-c-tag",      ko_required_argument, 315 },
     { "mini-circle",    ko_no_argument,       'M' },
     { "mito-db",        ko_required_argument, 'm' },
     { "pltd-db",        ko_required_argument, 'p' },
@@ -117,7 +120,7 @@ int main(int argc, char *argv[])
     int do_ec, do_unzip, input_asg, do_graph_clean, no_trn, no_rrn;
     size_t m_data;
     FILE *fp_help;
-    char *out, *nhmmscan, *mito_db, *pltd_db, *tmpdir;
+    char *out, *nhmmscan, *mito_db, *pltd_db, *tmpdir, *ec_tag, *kc_tag, *sc_tag;
     int c, ret = 0;
 
     sys_init();
@@ -160,6 +163,9 @@ int main(int argc, char *argv[])
     ext_m = 1;
     seq_cf = .90;
     min_cf = .20;
+    ec_tag = 0;
+    kc_tag = 0;
+    sc_tag = 0;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 'k') k = atoi(opt.arg);
@@ -207,6 +213,9 @@ int main(int argc, char *argv[])
         else if (c == 310) no_trn = 0;
         else if (c == 311) no_rrn = 0;
         else if (c == 312) do_graph_clean = 0;
+        else if (c == 313) ec_tag = opt.arg;
+        else if (c == 314) kc_tag = opt.arg;
+        else if (c == 315) sc_tag = opt.arg;
         else if (c == 'v') VERBOSE = atoi(opt.arg);
         else if (c == 'h') fp_help = stdout;
         else if (c == 'V') {
@@ -265,6 +274,9 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    --include-trn        include tRNA genes for sequence classification\n");
         fprintf(fp_help, "    --include-rrn        include rRNA genes for sequence classification\n");
         fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
+        fprintf(fp_help, "    --edge-c-tag STR     edge coverage tag in the GFA file [EC:i] \n");
+        fprintf(fp_help, "    --kmer-c-tag STR     kmer coverage tag in the GFA file [KC:i] \n");
+        fprintf(fp_help, "    --seq-c-tag  STR     sequence coverage tag in the GFA file [SC:f]\n");
         fprintf(fp_help, "\n");
         fprintf(fp_help, "Example: ./oatk -o oatk.asm -t 16 -m angiosperm_mito.fam -p angiosperm_pltd.fam hifi.fa.gz\n\n");
         return fp_help == stdout? 0 : 1;
@@ -275,6 +287,33 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
     if (out_s < 0) out_s = 0;
+
+    if (ec_tag != 0) {
+        if(is_valid_gfa_tag(ec_tag)) {
+            memcpy(TAG_ARC_COV, ec_tag, 4);
+        } else {
+            fprintf(stderr, "[E::%s] invalid GFA tag (Regexp: [A-Za-z][A-Za-z0-9]:[A|i|f|Z|B]): %s\n", __func__, ec_tag);
+            return 1;
+        }
+    }
+
+    if (kc_tag != 0) {
+        if(is_valid_gfa_tag(kc_tag)) {
+            memcpy(TAG_SBP_COV, kc_tag, 4);
+        } else {
+            fprintf(stderr, "[E::%s] invalid GFA tag (Regexp: [A-Za-z][A-Za-z0-9]:[A|i|f|Z|B]): %s\n", __func__, kc_tag);
+            return 1;
+        }
+    }
+
+    if (sc_tag != 0) {
+        if(is_valid_gfa_tag(sc_tag)) {
+            memcpy(TAG_SEQ_COV, sc_tag, 4);
+        } else {
+            fprintf(stderr, "[E::%s] invalid GFA tag (Regexp: [A-Za-z][A-Za-z0-9]:[A|i|f|Z|B]): %s\n", __func__, sc_tag);
+            return 1;
+        }
+    }
 
     if (n_db == 0) {
         fprintf(stderr, "[E::%s] provide at least one HMM profile database (-m and/or -p)\n", __func__);
