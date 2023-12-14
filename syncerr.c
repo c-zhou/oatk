@@ -33,6 +33,7 @@
 #include <assert.h>
 #include <math.h>
 #include <pthread.h>
+#include <limits.h>
 
 #include "kvec.h"
 #include "kstring.h"
