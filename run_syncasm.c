@@ -32,6 +32,7 @@
 #include <string.h>
 #include <math.h>
 #include <errno.h>
+#include <limits.h>
 
 #include "kvec.h"
 #include "kstring.h"
