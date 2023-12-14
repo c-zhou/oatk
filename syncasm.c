@@ -35,7 +35,6 @@
 #include <float.h>
 #include <pthread.h>
 #include <assert.h>
-#include <limits.h>
 
 #include "kvec.h"
 #include "kdq.h"
