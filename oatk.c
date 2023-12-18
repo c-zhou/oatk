@@ -97,8 +97,8 @@ static ko_longopt_t long_options[] = {
     { "mito-db",        ko_required_argument, 'm' },
     { "pltd-db",        ko_required_argument, 'p' },
     { "threads",        ko_required_argument, 't' },
-    { "min-score",      ko_required_argument, 'S' },
     { "min-gain",       ko_required_argument, 'g' },
+    { "min-score",      ko_required_argument, 'S' },
     { "max-eval",       ko_required_argument, 'e' },
     { "min-s-length",   ko_required_argument, 'l' },
     { "min-s-cov",      ko_required_argument, 'q' },
@@ -158,7 +158,7 @@ int main(int argc, char *argv[])
     do_graph_clean = 1;
     max_eval = 1e-6;
     min_len = -1;
-    min_score = 100;
+    min_score = 300;
     ext_p = 3;
     ext_m = 1;
     seq_cf = .90;
@@ -262,12 +262,12 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    --nhmmscan STR       nhmmscan executable path [nhmmscan]\n");
         fprintf(fp_help, "  Pathfinder:\n");
         fprintf(fp_help, "    -f FLOAT             prefer circular path to longest if >= FLOAT sequence covered [%.2f]\n", seq_cf);
-        fprintf(fp_help, "    -S FLOAT             minimum total annotation score of a subgraph [%.1f]\n", min_score);
-        fprintf(fp_help, "    -g INT[,INT]         minimum number of core gene gain; the second INT for mitochondria [%d,%d]\n", ext_p, ext_m);
         //fprintf(fp_help, "    --longest            output only the longest path [default]\n");
         //fprintf(fp_help, "    --circular           output only the longest circular path\n");
         //fprintf(fp_help, "    --all                output all best paths\n");
+        fprintf(fp_help, "    -S FLOAT             minimum annotation score of a core gene [%.1f]\n", min_score);
         fprintf(fp_help, "    -e FLOAT             maximum E-value of a core gene [%.3e]\n", max_eval);
+        fprintf(fp_help, "    -g INT[,INT]         minimum number of core gene gain; the second INT for mitochondria [%d,%d]\n", ext_p, ext_m);
         fprintf(fp_help, "    -l INT               minimum length of a singleton sequence to keep [%d]\n", mini_circle? 5000 : 10000);
         fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
         fprintf(fp_help, "    -C INT               maximum copy number to consider [%d]\n", max_copy);

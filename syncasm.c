@@ -1814,7 +1814,7 @@ static void make_ma_block(scg_t *g, sr_t *sr, scg_ra_t *ra, uint32_t n, ma_t *ma
         for (i = 0; i < n; ++i)
             s_beg = MAX(s_beg, begs[i]);
         // find max extension
-        m_ext = INT_MAX;
+        m_ext = INT32_MAX;
         for (i = 0; i < n; ++i) {
             ext = (int) lens[i] - s_beg + begs[i];
             m_ext = MIN(m_ext, ext);

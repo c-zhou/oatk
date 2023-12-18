@@ -101,8 +101,8 @@ static void dfs_info_reset(dfs_info_t *dfs)
     if (!dfs) return;
     dfs->status = EC_FAILURE;
     dfs->n_path = 0;
-    dfs->edist = INT_MAX;
-    dfs->s_edist = INT_MAX;
+    dfs->edist = INT32_MAX;
+    dfs->s_edist = INT32_MAX;
     dfs->c_seq.l = 0;
     dfs->opt_seq.l = 0;
     dfs->c_path.n = 0;
@@ -220,7 +220,7 @@ static void dfs_search(asmg_t *asmg, syncmer_t *scms, dfs_info_t *dfs_info, uint
             // this is necessary only ifdef DEBUG_SYNCMER_CORRECTION
             // as edist could be updated before this
             if (!dfs_info->status)
-                dfs_info->edist = INT_MAX;
+                dfs_info->edist = INT32_MAX;
 #endif
             dfs_info->status = EC_SUCCESS; // update EC_STATUS
             if (score <= dfs_info->edist) {

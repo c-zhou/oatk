@@ -53,7 +53,9 @@ static const uint32_t COMMON_MAX_PLTD_SIZE = 200000;
 static const uint32_t COMMON_AVG_PLTD_SIZE = 160000;
 static const uint32_t COMMON_MIN_PLTD_SIZE =  80000;
 // pltd to mito score fold difference threshold to consider change organelle type annotation
-static const double PLTD_TO_MITO_FST[2] = {2.0, 4.0};
+static const double PLTD_TO_MITO_FST[2] = {3.0, 5.0};
+// common max size of plant mito
+static const uint32_t COMMON_MAX_MITO_SIZE = 3000000;
 // common max size of minicircles
 static const uint32_t COMMON_MAX_MINICIRCLE_SIZE = 50000;
 

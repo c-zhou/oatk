@@ -187,7 +187,7 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
             cleaned += asmg_pop_bubble(scg->utg_asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
             cleaned += asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 10, 0, VERBOSE);
         }
-        cleaned += asmg_drop_tip(scg->utg_asmg, INT_MAX, tip_size, 1, 0, VERBOSE);
+        cleaned += asmg_drop_tip(scg->utg_asmg, INT32_MAX, tip_size, 1, 0, VERBOSE);
     }
     process_mergeable_unitigs(scg);
     
@@ -277,7 +277,7 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
             cleaned = 0;
             cleaned += asmg_pop_bubble(scg->utg_asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
             cleaned += asmg_remove_weak_crosslink(scg->utg_asmg, weak_cross, 10, 0, VERBOSE);
-            cleaned += asmg_drop_tip(scg->utg_asmg, INT_MAX, tip_size, 1, 0, VERBOSE);
+            cleaned += asmg_drop_tip(scg->utg_asmg, INT32_MAX, tip_size, 1, 0, VERBOSE);
         }
         process_mergeable_unitigs(scg);
 

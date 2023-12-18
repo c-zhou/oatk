@@ -47,17 +47,17 @@ The positional parameter specifies the input PacBio HiFi data file. The program 
 
 Upon a successful run, the command will generate these major files:
 ~~~
-ddAraThal4.utg.final.gfa      the GFA file for the final genome assembly                      | syncasm
-ddAraThal4.annot_mito.txt     the MT gene annotation file over all assembled sequences        | hmm_annotation
-ddAraThal4.annot_pltd.txt     the PT gene annotation file over all assembled sequences        | hmm_annotation
-ddAraThal4.mito.gfa           the subgraph for the MT genome                                  | pathfinder
-ddAraThal4.mito.bed           the gene annotation for the MT sequences                        | pathfinder
-ddAraThal4.mito.ctg.fasta     the structure-solved MT contigs                                 | pathfinder
-ddAraThal4.mito.ctg.bed       the genome annotation for MT contigs                            | pathfinder
-ddAraThal4.pltd.gfa           the subgraph for the PT genome                                  | pathfinder
-ddAraThal4.pltd.bed           the gene annotation for the PT sequences                        | pathfinder
-ddAraThal4.pltd.ctg.fasta     the structure-solved PT contigs                                 | pathfinder
-ddAraThal4.pltd.ctg.bed       the genome annotation for PT contigs                            | pathfinder
+ddAraThal4.utg.final.gfa     the GFA file for the final genome assembly             | syncasm
+ddAraThal4.annot_mito.txt    the MT gene annotation file for assembled sequences    | hmm_annotation
+ddAraThal4.annot_pltd.txt    the PT gene annotation file for assembled sequences    | hmm_annotation
+ddAraThal4.mito.gfa          the subgraph for the MT genome                         | pathfinder
+ddAraThal4.mito.bed          the gene annotation for the MT sequences               | pathfinder
+ddAraThal4.mito.ctg.fasta    the structure-solved MT contigs                        | pathfinder
+ddAraThal4.mito.ctg.bed      the genome annotation for MT contigs                   | pathfinder
+ddAraThal4.pltd.gfa          the subgraph for the PT genome                         | pathfinder
+ddAraThal4.pltd.bed          the gene annotation for the PT sequences               | pathfinder
+ddAraThal4.pltd.ctg.fasta    the structure-solved PT contigs                        | pathfinder
+ddAraThal4.pltd.ctg.bed      the genome annotation for PT contigs                   | pathfinder
 ~~~
 
 ### Use individual programs

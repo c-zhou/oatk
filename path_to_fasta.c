@@ -130,7 +130,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    if (line_width == 0) line_width = INT_MAX;
+    if (line_width == 0) line_width = INT32_MAX;
 
     if (out) {
         out_seqs = fopen(out, "w");

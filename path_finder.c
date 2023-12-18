@@ -93,8 +93,8 @@ FILE *fopen1(char *fn)
     return fo;
 }
 
-static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components,
-        int min_s_len, int max_copy, int min_ex_g, double seq_cf, int do_clean, double min_cf, double max_eval,
+static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components, int min_s_len,
+        int max_copy, int min_ext_g, double seq_cf, int do_clean, double min_cf, double min_score, double max_eval,
         int bubble_size, int tip_size, double weak_cross, char *out_pref, int out_opt, OG_TYPE_t og_type, int VERBOSE)
 {
     assert(og_type == OG_MITO || og_type == OG_PLTD || og_type == OG_MINI);
@@ -113,12 +113,12 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
     FILE *out_gfa_bed = fopen1(fn_str);
     free(fn_str);
 
-    uint32_t i, j, v, opt_circ;
-    int c, ex_g, absent;
+    uint32_t i, j, v, opt_circ, b_length;
+    int c, ext_g, all_g, absent;
     uint64_t n_seg;
-    double opt_coverage, g_diff;
+    double opt_coverage, g_diff, c_diff, h_score, b_score, score, score1;
     og_component_t *component;
-    kh_s32_t *h_genes;
+    kh_s32_t *h_genes, *b_genes;
     khint32_t k;
     kvec_t(uint32_t) sub_v;
     asmg_t *o_asmg;
@@ -127,14 +127,17 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
     o_asmg = asg->asmg; // original copy of asmg
     n_seg = asg->n_seg;
     h_genes = kh_s32_init();
+    b_genes = kh_s32_init();
     kv_init(sub_v);
     c = 0;
     opt_circ = 0;
     opt_coverage = 0.;
-    g_diff = og_type == OG_MITO? 0.8 : 0.9; // relaxation for gene socres
+    g_diff = 0.85; // score difference for new genes
+    c_diff = 0.6; // gene density difference
     bed_annots = hmm_annot_bed6_db_init();
 
     // build gene table
+    // best score for each gene
     for (i = 0; i < og_components->n; ++i) {
         component = &og_components->a[i];
         if (component->type != og_type)
@@ -142,14 +145,21 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
         for (j = 0; j < component->ng; ++j) {
             if ((component->g[j]>>32 & 0x3) != (uint32_t) og_type)
                 continue;
-            k = kh_s32_get(h_genes, component->g[j]>>32);
-            if (k == kh_end(h_genes) || kh_val(h_genes, k) < (uint32_t) component->g[j]) {
-                k = kh_s32_put(h_genes, component->g[j]>>32, &absent);
+            k = kh_s32_put(h_genes, component->g[j]>>32, &absent);
+            if (absent || kh_val(h_genes, k) < (uint32_t) component->g[j])
                 kh_val(h_genes, k) = (uint32_t) component->g[j];
-            }
         }
     }
+    h_score = 0; // total score
+    for (k = (khint32_t) 0; k < kh_end(h_genes); ++k)
+        if (kh_exist(h_genes, k))
+            h_score += kh_val(h_genes, k);
+    if (VERBOSE > 0)
+        fprintf(stderr, "[M::%s] total gene score for the organelle: type, %s; score, %.1f\n",
+                __func__, OG_TYPES[og_type], h_score);
 
+    b_score = 0;
+    b_length = 0;
     for (i = 0; i < og_components->n; ++i) {
         component = &og_components->a[i];
         if (component->type != og_type)
@@ -161,23 +171,49 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
                     component->score, component->sscore, component->len, component->nv, component->ng);
         
         // find number of genes included in the subgraph
-        ex_g = 0;
+        ext_g = all_g = 0;
         for (j = 0; j < component->ng; ++j) {
             if ((component->g[j]>>32 & 0x3) != (uint32_t) og_type)
                 continue;
-            k = kh_s32_get(h_genes, component->g[j]>>32);
-            if (k == kh_end(h_genes) || // gene not presented - for safety only - not possible
-                    kh_val(h_genes, k) * g_diff <= (uint32_t) component->g[j]) // gene score is good enough
-                ++ex_g;
+            k = kh_s32_get(b_genes, component->g[j]>>32);
+            score = k == kh_end(b_genes)? 0 : kh_val(b_genes, k);
+            score1 = (uint32_t) component->g[j];
+            if (score1 >= min_score && score1 >= score)
+                ++ext_g; // extra gene count
+            if (score1 >= score * g_diff)
+                ++all_g; // all gene count
         }
         
         // skip component with no enough extra genes
-        if (ex_g < min_ex_g) {
+        if (ext_g < min_ext_g && all_g < kh_size(b_genes) * c_diff) {
             if (VERBOSE > 0)
                 fprintf(stderr, "[M::%s] subgraph seeding from %s SKIPPED due to insufficient gene gain (%d)\n",
-                        __func__, asg->seg[component->v[0]].name, ex_g);
+                        __func__, asg->seg[component->v[0]].name, ext_g);
             continue;
         }
+
+        // do a specical check for OG_PLTD
+        // require enough gene density
+        // TODO is this a good strategy
+        if (og_type == OG_PLTD &&
+                b_length + component->len > COMMON_AVG_PLTD_SIZE && // the size exceeds the expected PLTD size
+                component->score * b_length < b_score * component->len * c_diff) {
+            if (VERBOSE > 0)
+                fprintf(stderr, "[M::%s] subgraph seeding from %s SKIPPED due to low PLTD gene density (%.1f/%u < %.1f/%u*%.1f)\n",
+                        __func__, asg->seg[component->v[0]].name, component->score, component->len, b_score, b_length, c_diff);
+            continue;
+        }
+
+        // add subgraph genes to the organelle gene table
+        for (j = 0; j < component->ng; ++j) {
+            if ((component->g[j]>>32 & 0x3) != (uint32_t) og_type)
+                continue;
+            k = kh_s32_put(b_genes, component->g[j]>>32, &absent);
+            if (absent || kh_val(b_genes, k) < (uint32_t) component->g[j])
+                kh_val(b_genes, k) = (uint32_t) component->g[j];
+        }
+        b_score += component->score;
+        b_length += component->len;
 
         // processing the subgraph
         // make a copy of the orginal asmg
@@ -202,7 +238,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
                 cleaned = 0;
                 cleaned += asmg_pop_bubble(asg->asmg, bubble_size, 0, 0, 1, 0, VERBOSE);
                 cleaned += asmg_remove_weak_crosslink(asg->asmg, weak_cross, 10, 0, VERBOSE);
-                cleaned += asmg_drop_tip(asg->asmg, INT_MAX, tip_size, 1, 0, VERBOSE);
+                cleaned += asmg_drop_tip(asg->asmg, INT32_MAX, tip_size, 1, 0, VERBOSE);
             }
             
             if (VERBOSE > 1) {
@@ -229,8 +265,10 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
         if (VERBOSE > 0)
             fprintf(stderr, "[M::%s] estimated per-copy sequence coverage: %.3f\n", __func__, avg_coverage);
 
-        if (og_type == OG_MITO && avg_coverage < opt_coverage * min_cf) {
-            // the sequence coverage of this subgraph is too low
+        if (og_type == OG_MITO && opt_coverage > 0 &&
+                (avg_coverage < opt_coverage * min_cf ||
+                 avg_coverage * min_cf > opt_coverage)) {
+            // the sequence coverage of this subgraph is too low or too high
             // clean and roll back
             free(copy_number);
             asg->asmg = o_asmg; // roll back to the original copy
@@ -431,8 +469,8 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
                 free(incl);
 
                 if (VERBOSE > 0)
-                    fprintf(stderr, "[M::%s] processing subgraph seeding from %s DONE, %d better genes gained\n",
-                            __func__, asg->seg[component->v[0]].name, ex_g);
+                    fprintf(stderr, "[M::%s] processing subgraph seeding from %s DONE, %d better genes gained, total score %.1f\n",
+                            __func__, asg->seg[component->v[0]].name, ext_g, b_score);
             }
 
             kv_destroy(v_pb);
@@ -488,6 +526,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
     }
     kv_destroy(sub_v);
     kh_s32_destroy(h_genes);
+    kh_s32_destroy(b_genes);
     hmm_annot_bed6_db_destroy(bed_annots);
 
     //fclose(out_stats);
@@ -839,7 +878,7 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_db_t *annot_db, og_c
 }
 
 int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len,
-        int min_ex_g, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+        int min_ext_g, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int n_threads, int VERBOSE)
 {
@@ -940,10 +979,10 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, 
     // graph will be changed with extra copies of sequences added
     if (mito_annot)
         parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, ext_m, seq_cf, do_graph_clean, 
-                min_cf, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
+                min_cf, min_score, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
     if (pltd_annot)
         parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, ext_p, seq_cf, do_graph_clean, 
-                min_cf, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
+                min_cf, min_score, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
 
 do_clean:
     asg_destroy(asg);
@@ -1015,7 +1054,7 @@ int main(int argc, char *argv[])
     weak_cross = 0.3;
     max_eval = 1e-6;
     min_len = 10000;
-    min_score = 100;
+    min_score = 300;
     ext_p = 3;
     ext_m = 1;
     seq_cf = .90;
@@ -1082,9 +1121,9 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -v INT               verbose level [%d]\n", VERBOSE);
         fprintf(fp_help, "    --version            show version number\n");
         fprintf(fp_help, "  Classification:\n");
-        fprintf(fp_help, "    -s FLOAT             minimum total annotation score of a subgraph [%.1f]\n", min_score);
-        fprintf(fp_help, "    -g INT[,INT]         minimum number of core gene gain; the second INT for mitochondria [%d,%d]\n", ext_p, ext_m);
+        fprintf(fp_help, "    -s FLOAT             minimum annotation score of a core gene [%.1f]\n", min_score);
         fprintf(fp_help, "    -e FLOAT             maximum E-value of a core gene [%.3e]\n", max_eval);
+        fprintf(fp_help, "    -g INT[,INT]         minimum number of core gene gain; the second INT for mitochondria [%d,%d]\n", ext_p, ext_m);
         fprintf(fp_help, "    -l INT               minimum length of a singleton sequence to keep [%d]\n", min_len);
         fprintf(fp_help, "    --include-trn        include tRNA genes for sequence classification\n");
         fprintf(fp_help, "    --include-rrn        include rRNA genes for sequence classification\n");

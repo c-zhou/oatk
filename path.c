@@ -2882,7 +2882,7 @@ double *get_sequence_annot_score(hmm_annot_db_t *annot_db, asg_t *asg, int no_tr
     n_seg = asg->n_seg;
 
     if (n_gene == 0) return 0;
-    if (n_core == 0) n_core = INT_MAX;
+    if (n_core == 0) n_core = INT32_MAX;
     
     m_gene = annot_db->n_gene;
 
@@ -2948,7 +2948,7 @@ og_component_v *annot_sequence_og_type(hmm_annot_db_t *annot_db, asg_t *asg, int
     n_seg = asg->n_seg;
 
     if (n_gene == 0) return 0;
-    if (n_core == 0) n_core = INT_MAX;
+    if (n_core == 0) n_core = INT32_MAX;
 
     m_gene = annot_db->n_gene;
 
@@ -3082,7 +3082,7 @@ og_component_v *annot_subgraph_og_type(hmm_annot_db_t *annot_db, asg_t *asg, int
     n_seg = asg->n_seg;
 
     if (n_gene == 0) return 0;
-    if (n_core == 0) n_core = INT_MAX;
+    if (n_core == 0) n_core = INT32_MAX;
 
     m_gene = annot_db->n_gene;
 
@@ -3379,6 +3379,8 @@ typedef struct {
     double val;
     int size;
     int clust;
+    int gene_num[4];
+    OG_TYPE_t og_type;
 } clust_dp_t;
 
 typedef struct {
@@ -3470,8 +3472,9 @@ static clust_t *make_cluster(clust_dp_t *dps, int n_dps, int n_clust, int min_le
     // major cluster tends to be low-copy sequences
     // minor cluster is allowed to have higher copy numbers
     // decision made mainly based on the sequence size
-    // if the cluster size is smaller than than 10% of the total size
-    // and all sequences in the cluster is smaller than min_len
+    // mark a major cluster if 
+    // the cluster size is larger than 10% of the total size
+    // and at least one sequence is larger than min_len
     // mark major cluster using the last bit of 'clust'
     // TODO estiamte size proportion (10%) with sequences of similar coverage
     int j;
@@ -3481,18 +3484,14 @@ static clust_t *make_cluster(clust_dp_t *dps, int n_dps, int n_clust, int min_le
     size *= 0.1;
     for (i = 0; i < n_clust; ++i) {
         clusts[i].clust <<= 1;
-        c = 0; // mark minor cluster
-        if (clusts[i].size >= size) {
-            c = 1; // mark major cluster
-        } else {
-            for (j = 0; j < clusts[i].n_dps; ++j) {
-                if (dps[clusts[i].dps[j]].size >= min_len) {
-                    c = 1; // mark major cluster
-                    break;    
-                }
+        if (clusts[i].size < size)
+            continue;
+        for (j = 0; j < clusts[i].n_dps; ++j) {
+            if (dps[clusts[i].dps[j]].size >= min_len) {
+                clusts[i].clust |= 1; // mark major cluster
+                break;
             }
         }
-        clusts[i].clust |= c;
     }
     **/
 
@@ -3508,13 +3507,12 @@ KDQ_INIT(uint64_t)
 
 typedef kdq_t(uint64_t) kdq_u64_t;
 
-static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *component_g, OG_TYPE_t og_target, 
-        OG_TYPE_t og_contam, clust_t *clusts, int n_clust, uint32_t *gene_num, double min_cov, double max_cov, 
-        int max_r_len, og_component_v *components, int verbose)
+static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *component_g, clust_dp_t *comp_dps, OG_TYPE_t og_target, 
+        OG_TYPE_t *og_seeds, double c_mean, int max_r_len, og_component_v *components, int verbose)
 {
     uint32_t i, j, k, l, v, w, r, nv, na, len, gen, cov, gid, n_vtx, imax, smax, *comp_v;
-    uint8_t *dels, *visited, *clust_v;
-    double c_mean, score[4];
+    uint8_t *dels, *visited;
+    double score[4];
     asmg_t *asmg;
     asmg_arc_t *av;
     og_component_t *component_s, *component;
@@ -3524,14 +3522,10 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
     comp_v = component_g->v;
     nv = component_g->nv;
 
-    c_mean = min_cov;
-    min_cov = MIN(c_mean, max_cov / 2.5);
-    max_cov = MAX(max_cov, c_mean * 2.5);
-    
     // do graph slimming
     if (verbose > 1) {
-        fprintf(stderr, "[M::%s] subgraph slimming for organelle [%s] against [%s] with sequence coverage %.3f - %.3f\n", 
-                __func__, OG_TYPES[og_target], OG_TYPES[og_contam], min_cov, max_cov);
+        fprintf(stderr, "[M::%s] subgraph slimming for organelle [%s] with average sequence coverage %.3f\n", 
+                __func__, OG_TYPES[og_target], c_mean);
         if (verbose > 2) {
             asmg_t *g = asg->asmg;
             asg->asmg = asmg;
@@ -3540,36 +3534,11 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
         }
     }
 
-    // collect sequences in target cluster
-    MYCALLOC(clust_v, nv);
-    for (i = 0; i < n_clust; ++i) {
-        if (og_target != clusts[i].og_type)
-            continue;
-        for (j = 0; j < clusts[i].n_dps; ++j)
-            clust_v[clusts[i].dps[j]] = 1;
-    }
-
     // find sequences to remove
     MYCALLOC(dels, n_vtx);
-    for (i = 0; i < n_clust; ++i) {
-        if (og_contam != OG_UNCLASSIFIED &&
-                og_contam == clusts[i].og_type) {
-            // this is a contamination cluster
-            for (j = 0; j < clusts[i].n_dps; ++j) {
-                v = clusts[i].dps[j];
-                dels[comp_v[v]] = 1;
-            } 
-        } else if (og_target != clusts[i].og_type) {
-            // this is a unclassified cluster
-            for (j = 0; j < clusts[i].n_dps; ++j) {
-                v = clusts[i].dps[j];
-                len = asmg->vtx[comp_v[v]].len;
-                cov = asmg->vtx[comp_v[v]].cov;
-                if (cov < min_cov || cov > max_cov)
-                    dels[comp_v[v]] = 1;
-            }
-        }
-    }
+    for (i = 0; i < nv; ++i)
+        if (og_seeds[i] != og_target)
+            dels[comp_v[i]] = 1;
 
     // bring back the sequence if in a critical path
     // TODO improve the recalling strategy
@@ -3689,7 +3658,7 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
         cleaned = 0;
         cleaned += asmg_pop_bubble(asmg, max_r_len, 0, 0, 1, 0, verbose);
         cleaned += asmg_remove_weak_crosslink(asmg, 0.3, 10, 0, verbose);
-        cleaned += asmg_drop_tip(asmg, INT_MAX, max_r_len, 1, 0, verbose);
+        cleaned += asmg_drop_tip(asmg, INT32_MAX, max_r_len, 1, 0, verbose);
     }
     // add cleaned vtx to dels for integrity
     for (i = 0; i < nv; ++i) {
@@ -3734,7 +3703,7 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
                 continue;
             kv_push(uint32_t, comp_s, w);
             len += g->vtx[w].len;
-            gen += gene_num[nv * og_target + j];
+            gen += comp_dps[j].gene_num[og_target];
             visited[w] = 1;
         }
         if (len < m_size || gen == 0) {
@@ -3750,7 +3719,7 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
         for (j = 0; j < nv; ++j) {
             w = comp_v[j];
             if (g->vtx[w].del ||
-                    clust_v[j] ||
+                    og_seeds[j] == og_target ||
                     g->vtx[w].len >= max_r_len ||
                     g->vtx[w].cov < c_mean * 3.5)
                 continue;
@@ -3839,8 +3808,161 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
 
     free(dels);
     free(visited);
-    free(clust_v);
     asmg_destroy(asmg);
+}
+
+static void find_coverage_bound_in_mixture_graph(clust_t *clusts, uint32_t n_clust, clust_dp_t *comp_dps, uint32_t nv, uint32_t max_mito_size, 
+        uint32_t max_pltd_size, double fold_thresh, double *min_mito, double *max_mito, double *min_pltd, double *max_pltd, int verbose)
+{
+    return;
+}
+
+static uint32_t find_seeds_in_pure_graph(clust_t *clusts, uint32_t n_clust, clust_dp_t *comp_dps, uint32_t nv, OG_TYPE_t og_t, double min_mean, 
+        double max_mean, double fold_thresh, uint32_t min_size, uint32_t max_size, double *_c_mean, OG_TYPE_t *og_seeds, int verbose)
+{
+    uint32_t i, j, c, v, seed, n_seeds, l_seeds, *seed_clust, *gseq_clust;
+    uint64_t *gene_clust;
+    double c_mean, min_mean1, max_mean1;
+
+    // count number of best genes in each coverage cluster
+    MYCALLOC(gseq_clust, n_clust);
+    MYCALLOC(gene_clust, n_clust);
+    for (i = 0; i < n_clust; ++i) {
+        for (j = 0; j < clusts[i].n_dps; ++j) {
+            v = clusts[i].dps[j];
+            gene_clust[i] += comp_dps[v].gene_num[og_t];
+            if (comp_dps[v].gene_num[og_t] > 0)
+                gseq_clust[i] += comp_dps[v].size;
+        }
+        gene_clust[i] <<= 32;
+        gene_clust[i] |= i;
+        // a simple rule to decide if
+        // all sequences in a cluster should be added together
+        if (gseq_clust[i] > 0.5 * clusts[i].size)
+            gseq_clust[i] = clusts[i].size;
+    }
+    // sort clusters by number of best genes in descending order
+    qsort(gene_clust, n_clust, sizeof(uint64_t), u64_cmpfunc_r);
+    
+    // collect seeds in each cluster
+    MYCALLOC(seed_clust, n_clust);
+    min_mean1 = max_mean1 = 0;
+    n_seeds = l_seeds = 0;
+    for (i = 0; i < n_clust; ++i) {
+        if ((gene_clust[i] >> 32) == 0)
+            // no gene
+            break;
+        c = (uint32_t) gene_clust[i]; // cluster index
+        if (clusts[c].og_type != og_t)
+            // not the right organelle type
+            continue;
+        c_mean = clusts[c].mean;
+        if (c_mean < min_mean && c_mean > max_mean)
+            // coverage not in range
+            continue;
+        if (l_seeds + gseq_clust[c] > max_size)
+            // too much sequence
+            continue;
+        seed = 0;
+        if (n_seeds == 0) {
+            // major cluster
+            // mean coverage not set yet
+            min_mean1 = c_mean;
+            max_mean1 = c_mean;
+            seed = 1;
+        } else {
+            // secondary clusters
+            if (gseq_clust[c] >= min_size) {
+                // this is a large cluster
+                // make it a seed only when
+                // the fold difference is within the range
+                if (c_mean >= min_mean1 && c_mean <= max_mean1) {
+                    // mean coverage is within the old range
+                    seed = 1;
+                } else if (fabs(log(min_mean1/c_mean)) <= fold_thresh &&
+                        fabs(log(max_mean1/c_mean)) <= fold_thresh) {
+                    // mean coverage is within the new range
+                    // update coverage
+                    if (c_mean < min_mean1)
+                        min_mean1 = c_mean;
+                    if (c_mean > max_mean1)
+                        max_mean1 = c_mean;
+                    seed = 1;
+                }
+            } else {
+                // this is a small cluster
+                // make it a seed
+                // but do not change the coverage
+                seed = 1;
+            }
+        }
+        if (seed) {
+            seed_clust[c] = 1;
+            n_seeds += 1;
+            l_seeds += gseq_clust[c];
+        }
+    }
+    
+    MYBZERO(og_seeds, nv);
+    // process clusters
+    int all_seq;
+    for (i = 0; i < n_clust; ++i) {
+        if (!seed_clust[i])
+            continue;
+        // not always to add all sequences
+        all_seq = clusts[i].size == gseq_clust[i];
+        for (j = 0; j < clusts[i].n_dps; ++j)
+            if (all_seq || 
+                    comp_dps[clusts[i].dps[j]].gene_num[og_t] > 0)
+                og_seeds[clusts[i].dps[j]] = og_t;
+    }
+
+    // process each unclassified individual sequence
+    uint32_t ext_l, ext_n;
+    OG_TYPE_t og_t1, *og_seeds1;
+    og_t1 = OG_UNCLASSIFIED;
+    if (og_t == OG_MITO)
+        og_t1 = OG_PLTD;
+    else if (og_t == OG_PLTD)
+        og_t1 = OG_MITO;
+    MYCALLOC(og_seeds1, nv);
+    ext_l = ext_n = 0;
+    for (i = 0; i < nv; ++i) {
+        c_mean = comp_dps[i].val;
+        if (!og_seeds[i] && 
+                (og_t1 == OG_UNCLASSIFIED || 
+                 comp_dps[i].gene_num[og_t1] == 0 ||
+                 comp_dps[i].gene_num[og_t] > 0) &&
+                c_mean >= min_mean &&
+                c_mean <= max_mean &&
+                fabs(log(min_mean1/c_mean)) <= fold_thresh) {
+            ext_l += comp_dps[i].size;
+            ext_n += 1;
+            og_seeds1[i] = og_t;
+        }
+    }
+    // only add extra sequences if total size within threshold
+    if (l_seeds + ext_l <= max_size) {
+        for (i = 0; i < nv; ++i)
+            if (og_seeds1[i])
+                og_seeds[i] = og_seeds1[i];
+        n_seeds += ext_n;
+        l_seeds += ext_l;
+    }
+
+    free(gseq_clust);
+    free(gene_clust);
+    free(seed_clust);
+    free(og_seeds1);
+    
+    if (verbose > 2)
+        fprintf(stderr, "[M::%s] [%s] - seeds number: %u; seeds length: %u; seeds coverage: %.3f - %.3f\n", 
+                __func__, OG_TYPES[og_t], n_seeds, l_seeds, min_mean1, max_mean1);
+
+    if (_c_mean)
+        *_c_mean = min_mean1;
+    
+    return l_seeds;
 }
 
 // this is a improved version of annot_subgraph_og_type
@@ -3853,15 +3975,16 @@ static void slim_graph(asg_t *asg, og_component_v *sequence_og, og_component_t *
 og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn, int no_rrn, double max_eval,
         int n_core, int min_len, int min_score, int fix_og, int verbose)
 {
-    uint32_t i, j, k, n, m, c, v, nv, gid, imax, smax, score, n_seg, n_gene, m_gene, n_clust, seed, l_seeds[4], n_seeds[4], *comp_v, *gene_num, *seed_clust;
-    uint64_t *gene_score, *gene_clust;
-    double *a_s, *annot_score, *seg_score, c_mean, min_mean[4], max_mean[4];
-    OG_TYPE_t og_t, *og_seeds;
+    uint32_t i, j, k, n, m, v, nv, gid, imax, smax, score, n_seg, n_gene, m_gene, n_clust;
+    uint32_t l_seeds[4], n_seeds[4], *comp_v;
+    uint64_t *gene_score;
+    double *a_s, *annot_score, *seg_score, g_n[4], c_means[4];
+    OG_TYPE_t og_t, **og_seeds;
     og_component_t *component_s, *component_g;
     og_component_v *sequence_og, *subgraph_og, *component_v;
     clust_dp_t *comp_dps;
     clust_t *clusts;
-    
+
     n_gene = annot_db->n;
     n_seg = asg->n_seg;
 
@@ -3888,60 +4011,83 @@ og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn,
                 annot_score[gid] = score;
         }
     }
-    
+
     // check if each subgraph is a mito-pltd mixture
     // separate organelle genomes for mixtures
-    double g_diff[4] = {0.9, 0.8, 0.9, 0.9}; // relaxation for gene socres
+    double g_diff = 0.85; // relaxation for gene socres
     MYCALLOC(component_v, 1);
     for (i = 0; i < subgraph_og->n; ++i) {
         component_g = &subgraph_og->a[i];
         comp_v = component_g->v;
         nv = component_g->nv;
 
-        // count genes with best annotation scores
-        MYCALLOC(gene_num, nv * 4);
-        for (j = 0; j < nv; ++j) {
-            component_s = &sequence_og->a[comp_v[j]];
-            og_t = component_s->type;
-            
-            a_s = &annot_score[m_gene * og_t];
-            gene_score = component_s->g;
-            // count genes with best annotation scores
-            n = 0;
-            for (k = 0; k < component_s->ng; ++k) {
-                if (((gene_score[k] >> 32) & 0x3) != og_t)
-                    continue;
-                gid = gene_score[k] >> 34;
-                score = (uint32_t) gene_score[k];
-                if ((double) score >= a_s[gid] * g_diff[og_t])
-                    ++n;
-            }
-            // the number of best genes
-            gene_num[nv * og_t + j] = n;
-        }
-        
-        // do clustering by sequence overage
         MYMALLOC(comp_dps, nv);
         for (j = 0; j < nv; ++j) {
             comp_dps[j].index = j;
             comp_dps[j].val = component_g->asmg->vtx[comp_v[j]].cov;
             comp_dps[j].size = component_g->asmg->vtx[comp_v[j]].len;
             comp_dps[j].clust = -1;
+            comp_dps[j].og_type = OG_UNCLASSIFIED;
+            MYBZERO(comp_dps[j].gene_num, 4);
         }
+
+        // count genes with best annotation scores
+        for (j = 0; j < nv; ++j) {
+            component_s = &sequence_og->a[comp_v[j]];
+            gene_score = component_s->g;
+            // count genes with best annotation scores
+            n = 0;
+            for (k = 0; k < component_s->ng; ++k) {
+                og_t = (gene_score[k] >> 32) & 0x3;
+                gid = gene_score[k] >> 34;
+                score = (uint32_t) gene_score[k];
+                a_s = &annot_score[m_gene * og_t];
+                if (score >= min_score &&
+                        (double) score >= a_s[gid] * g_diff)
+                    // the number of best genes
+                    ++comp_dps[j].gene_num[og_t];
+            }
+        }
+        
+        // do clustering by sequence overage
         n_clust = dbscan_cluster(comp_dps, nv, DBSCAN_EPS, CLUSTV_EPS);
         clusts = make_cluster(comp_dps, nv, n_clust, min_len);
 
         // organelle type classification for each coverage cluster
+        MYBZERO(l_seeds, 4);
+        MYBZERO(n_seeds, 4);
         for (j = 0; j < n_clust; ++j) {
             a_s = clusts[j].og_score;
             MYBZERO(a_s, 4);
+            MYBZERO(g_n, 4);
             for (m = 0, n = clusts[j].n_dps; m < n; ++m) {
-                v = comp_v[clusts[j].dps[m]];
-                for (k = 0; k < 4; ++k)
-                    a_s[k] += seg_score[v * 4 + k];
+                v = clusts[j].dps[m];
+                for (k = 0; k < 4; ++k) {
+                    a_s[k] += seg_score[comp_v[v] * 4 + k];
+                    g_n[k] += comp_dps[v].gene_num[k];
+                }
             }
             imax = max2(a_s, 4, &smax);
-            clusts[j].og_type = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
+            og_t = a_s[imax] == a_s[smax]? OG_UNCLASSIFIED : imax;
+            if (og_t == OG_PLTD && 
+                    smax == OG_MITO &&
+                    g_n[OG_MITO] > 0 &&
+                    (a_s[OG_PLTD] < a_s[OG_MITO] * PLTD_TO_MITO_FST[0] ||
+                     clusts[j].size > COMMON_MAX_PLTD_SIZE)) {
+                // fix OG_TYPE
+                og_t = OG_MITO;
+                if (verbose > 2)
+                    fprintf(stderr, "[M::%s] OG_TYPE changed from PLTD to MITO: CLUST=%d [M=%.3f N=%d L=%d] [MITO=%.3f PLTD=%.3f MINI=%.3f]\n",
+                            __func__, j, clusts[j].mean, clusts[j].n_dps, clusts[j].size, a_s[OG_MITO], a_s[OG_PLTD], a_s[OG_MINI]);
+            }
+            for (m = 0, n = clusts[j].n_dps; m < n; ++m) {
+                v = clusts[j].dps[m];
+                if (comp_dps[v].gene_num[og_t] > 0) {
+                    l_seeds[og_t] += component_g->asmg->vtx[comp_v[v]].len;
+                    n_seeds[og_t] += 1;
+                }
+            }
+            clusts[j].og_type = og_t;
         }
 
         if (verbose > 2) {
@@ -3958,132 +4104,79 @@ og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn,
                 v = comp_dps[j].index;
                 og_t = sequence_og->a[comp_v[v]].type;
                 fprintf(stderr, "[M::%s] %s [%s #MG=%d #PG=%d] COV=%.3f LEN=%d CLUST=%d\n", __func__,
-                        asg->seg[comp_v[v]].name, OG_TYPES[og_t], gene_num[nv * OG_MITO + v], gene_num[nv * OG_PLTD + v], 
+                        asg->seg[comp_v[v]].name, OG_TYPES[og_t], comp_dps[v].gene_num[OG_MITO], comp_dps[v].gene_num[OG_PLTD], 
                         comp_dps[j].val, comp_dps[j].size, comp_dps[j].clust);
             }
             qsort(comp_dps, nv, sizeof(clust_dp_t), dpIdx_cmpfunc);
+            fprintf(stderr, "[M::%s] subgraph organelle initial classification:\n", __func__);
+            for (j = 0; j < 4; ++j)
+                fprintf(stderr, "[M::%s] %s: SEED=%u SIZE=%u\n", __func__, OG_TYPES[j], n_seeds[j], l_seeds[j]);
         }
 
-        // check each sequence in the subgraph
-        // to find seeding sequences for each organelle type
-        MYMALLOC(gene_clust, n_clust);
-        MYCALLOC(seed_clust, n_clust);
-        MYCALLOC(og_seeds, nv);
-        MYBZERO(l_seeds, 4);
-        MYBZERO(n_seeds, 4);
-        MYBZERO(min_mean, 4);
-        MYBZERO(max_mean, 4);
-        for (j = 0; j < 4; ++j) {
-            // shift to the corresponding organelle type
-            gene_num += nv * j;
-            // count number of best genes in each coverage cluster
-            MYBZERO(gene_clust, n_clust);
-            for (k = 0; k < nv; ++k)
-                gene_clust[comp_dps[k].clust] += gene_num[k];
-            for (k = 0; k < n_clust; ++k) {
-                gene_clust[k] <<= 32;
-                gene_clust[k] |= k;
-            }
-            // sort clusters by number of best genes in descending order
-            qsort(gene_clust, n_clust, sizeof(uint64_t), u64_cmpfunc_r);
-            // collect seeds in each cluster
-            for (k = 0; k < n_clust; ++k) {
-                if ((gene_clust[k] >> 32) == 0)
-                    break;
-                n = gene_clust[k] >> 32;
-                c = (uint32_t) gene_clust[k]; // cluster index
-                if (clusts[c].og_type != j)
-                    continue;
-                seed = 0;
-                // major cluster
-                c_mean = clusts[c].mean;
-                if (min_mean[j] == 0) {
-                    // mean coverage not set yet
-                    seed = 1;
-                    min_mean[j] = c_mean;
-                    max_mean[j] = c_mean;
-                } else if (fabs(log(min_mean[j]/c_mean)) < LOG4_5 &&
-                        fabs(log(max_mean[j]/c_mean)) < LOG4_5 &&
-                        n >= 3) {
-                    // mean coverage is within 4.5-fold difference
-                    // for secondary clusters require at least 3 genes
-                    seed = 1;
-                    if (c_mean < min_mean[j]) min_mean[j] = c_mean;
-                    if (c_mean > max_mean[j]) max_mean[j] = c_mean;
-                }
-                //if (!(clusts[c].clust & 1)) // minor cluster
-                //    seed = 1;
-                if (!seed) continue;
-                for (m = 0, n = clusts[c].n_dps; m < n; ++m) {
-                    v = clusts[c].dps[m];
-                    og_t = sequence_og->a[comp_v[v]].type;
-                    if (gene_num[v] > 0 && og_t == j)
-                        og_seeds[v] = og_t;
-                }
-                seed_clust[c] = j;
-            }
-            // shift back to the beginning
-            gene_num -= nv * j;
-        }
-        
-        // collect seeds
-        for (j = 0; j < nv; ++j) {
-            og_t = og_seeds[j];
-            if (og_t == OG_UNCLASSIFIED)
-                continue;
-            n_seeds[og_t] += 1;
-            l_seeds[og_t] += comp_dps[j].size;
-            if (verbose > 2)
-                fprintf(stderr, "[M::%s] [%s] organelle seed with %u genes: %s\n", __func__, 
-                        OG_TYPES[og_t], gene_num[nv * og_t + j], asg->seg[comp_v[j]].name);
-        }
-        
         if (l_seeds[OG_MITO] > 0 && l_seeds[OG_PLTD] > 0) {
-            // filter out small seed clusters for mito-pltd mixtures
-            for (j = 0; j < 4; ++j) {
-                if (l_seeds[j] == 0 || l_seeds[j] >= min_len)
-                    continue;
-                for (k = 0; k < n_clust; ++k)
-                    if (seed_clust[k] == j)
-                        seed_clust[k] = OG_UNCLASSIFIED;
-                for (k = 0; k < nv; ++k)
-                    if (og_seeds[k] == j)
-                        og_seeds[k] = OG_UNCLASSIFIED;
-                if (verbose > 2) fprintf(stderr, "[M::%s] small [%s] organelle seed cluster filtered out: NS=%u LS=%u\n", __func__, 
-                        OG_TYPES[j], n_seeds[j], l_seeds[j]);
-                n_seeds[j] = 0;
-                l_seeds[j] = 0;
+            if (l_seeds[OG_MITO] > min_len && l_seeds[OG_PLTD] < min_len) {
+                l_seeds[OG_PLTD] = 0;
+                n_seeds[OG_PLTD] = 0;
+            } else if (l_seeds[OG_MITO] < min_len && l_seeds[OG_PLTD] > min_len) {
+                l_seeds[OG_MITO] = 0;
+                n_seeds[OG_MITO] = 0;
             }
         }
-        
-        // reassign cluster organelle type
-        for (j = 0; j < n_clust; ++j)
-            clusts[j].og_type = seed_clust[j];
 
-        if (verbose > 1) {
-            fprintf(stderr, "[M::%s] subgraph organelle seeds summary: \n", __func__);
-            for (k = 0; k < 4; ++k)
-                fprintf(stderr, "[M::%s] [%s] - seeds number: %u; seeds length: %u; seeds coverage: %.3f - %.3f\n", __func__,
-                        OG_TYPES[k], n_seeds[k], l_seeds[k], min_mean[k], max_mean[k]);
+        MYMALLOC(og_seeds, 4);
+        MYCALLOC(og_seeds[0], nv * 4);
+        for (j = 1; j < 4; ++j)
+            og_seeds[j] = og_seeds[j-1] + nv;
+        MYBZERO(c_means, 4);
+        if (l_seeds[OG_MITO] > 0 && l_seeds[OG_PLTD] > 0) {
+            // is a organelle mixture
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] processing subgraph as a organelle mixture\n", __func__);
+            double min_mito, max_mito, min_pltd, max_pltd;
+            min_mito = min_pltd = 0;
+            max_mito = max_pltd = DBL_MAX;
+            // TODO implement this subroutine to determine boundary of MITO and PLTD coverage
+            find_coverage_bound_in_mixture_graph(clusts, n_clust, comp_dps, nv, COMMON_MAX_MITO_SIZE, COMMON_MAX_PLTD_SIZE, 
+                    LOG4_5, &min_mito, &max_mito, &min_pltd, &max_pltd, verbose);
+            l_seeds[OG_MITO] = find_seeds_in_pure_graph(clusts, n_clust, comp_dps, nv, OG_MITO, min_mito, max_mito, LOG4_5, 
+                    min_len, COMMON_MAX_MITO_SIZE, &c_means[OG_MITO], og_seeds[OG_MITO], verbose);
+            l_seeds[OG_PLTD] = find_seeds_in_pure_graph(clusts, n_clust, comp_dps, nv, OG_PLTD, min_pltd, max_pltd, LOG4_5, 
+                    min_len, COMMON_MAX_PLTD_SIZE, &c_means[OG_PLTD], og_seeds[OG_PLTD], verbose);
+        } else if (l_seeds[OG_MITO] > 0) {
+            // pure mito
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] processing subgraph as a pure MITO\n", __func__);
+            l_seeds[OG_MITO] = find_seeds_in_pure_graph(clusts, n_clust, comp_dps, nv, OG_MITO, 0, DBL_MAX, LOG4_5, 
+                    min_len, COMMON_MAX_MITO_SIZE, &c_means[OG_MITO], og_seeds[OG_MITO], verbose);
+        } else if (l_seeds[OG_PLTD] > 0) {
+            // pure pltd
+            // similar to mito
+            // but also consider genome size
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] processing subgraph as a pure PLTD\n", __func__);
+            l_seeds[OG_PLTD] = find_seeds_in_pure_graph(clusts, n_clust, comp_dps, nv, OG_PLTD, 0, DBL_MAX, LOG4_5, 
+                    min_len, COMMON_MAX_PLTD_SIZE, &c_means[OG_PLTD], og_seeds[OG_PLTD], verbose);
+        } else if (l_seeds[OG_MINI] > 0) {
+            // is minicircle
+            if (verbose > 2)
+                fprintf(stderr, "[M::%s] processing subgraph as a MINICIRCLE\n", __func__);
+            l_seeds[OG_MINI] = find_seeds_in_pure_graph(clusts, n_clust, comp_dps, nv, OG_MINI, 0, DBL_MAX, LOG4_5, 
+                    min_len, COMMON_MAX_MINICIRCLE_SIZE, &c_means[OG_MINI], og_seeds[OG_MINI], verbose);
         }
-        
-        // process each organelle type
-        // for graph slimming
+
         if (l_seeds[OG_MITO] > 0)
-            slim_graph(asg, sequence_og, component_g, OG_MITO, OG_PLTD, clusts, n_clust, gene_num, 
-                    min_mean[OG_MITO], max_mean[OG_MITO], min_len, component_v, verbose);
+            slim_graph(asg, sequence_og, component_g, comp_dps, OG_MITO, og_seeds[OG_MITO],
+                    c_means[OG_MITO], min_len, component_v, verbose); 
         if (l_seeds[OG_PLTD] > 0)
-            slim_graph(asg, sequence_og, component_g, OG_PLTD, OG_MITO, clusts, n_clust, gene_num, 
-                    min_mean[OG_PLTD], max_mean[OG_PLTD], min_len, component_v, verbose);
+            slim_graph(asg, sequence_og, component_g, comp_dps, OG_PLTD, og_seeds[OG_PLTD],
+                    c_means[OG_PLTD], min_len, component_v, verbose);
         if (l_seeds[OG_MINI] > 0)
-            slim_graph(asg, sequence_og, component_g, OG_MINI, OG_UNCLASSIFIED, clusts, n_clust, gene_num, 
-                    min_mean[OG_MINI], max_mean[OG_MINI], min_len, component_v, verbose);
-        
+            slim_graph(asg, sequence_og, component_g, comp_dps, OG_MINI, og_seeds[OG_MINI],
+                    c_means[OG_MINI], min_len, component_v, verbose);
+
+        free(og_seeds[0]);
         free(og_seeds);
-        free(gene_num);
         free(comp_dps);
-        free(gene_clust);
-        free(seed_clust);
         for (j = 0; j < n_clust; ++j)
             free(clusts[j].dps);
         free(clusts);
