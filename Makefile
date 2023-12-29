@@ -7,6 +7,7 @@ OBJS=
 PROG=		syncasm hmm_annotation pathfinder path_to_fasta oatk
 PROG_EXTRA=
 LIBS=		-lm -lz -lpthread
+DESTDIR=	~/bin
 
 .PHONY:all extra clean depend
 .SUFFIXES:.c .o
@@ -40,6 +41,9 @@ oatk: oatk.c run_syncasm.c hmm_annotation.c path_finder.c hmmannot.c syncasm.c s
 
 clean:
 		rm -fr *.o a.out $(PROG) $(PROG_EXTRA)
+
+install:
+		cp $(PROG) $(DESTDIR)
 
 depend:
 		(LC_ALL=C; export LC_ALL; makedepend -Y -- $(CFLAGS) $(CPPFLAGS) -- *.c)
