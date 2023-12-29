@@ -4,6 +4,8 @@
 
 Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. It can also be used to assemble other simple organelle genomes such as animal mitochondria. The toolkit consists of four major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmm_annotation` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `pathfinder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure. `oatk` is a wrapper for running `syncasm`, `hmm_annotation` and `pathfinder` collectively. There is also an auxiliary tool `path_to_fasta` used to extract FASTA sequences from a [GFA format](https://github.com/GFA-spec/GFA-spec) file given a path.
 
+![oatk](https://github.com/c-zhou/oatk/assets/11916266/dca0e73b-e3aa-49ca-b3b6-18a53936cdca)
+
 ## Installation
 
 You need to have a C compiler, GNU make and zlib development files installed. Download the source code from this repo or with `git clone https://github.com/c-zhou/oatk.git`. Then type `make` in the source code directory to compile.
