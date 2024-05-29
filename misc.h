@@ -47,11 +47,11 @@ extern double realtime0;
 #define kroundup64(x) (--(x), (x)|=(x)>>1, (x)|=(x)>>2, (x)|=(x)>>4, (x)|=(x)>>8, (x)|=(x)>>16, (x)|=(x)>>32, ++(x))
 #endif
 
-#define MYMALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc((len) * sizeof(*(ptr))))
+#define MYMALLOC(ptr, len) ((ptr) = (__typeof__(ptr))malloc(sizeof(*(ptr)) * (len)))
 #define MYCALLOC(ptr, len) ((ptr) = (__typeof__(ptr))calloc((len), sizeof(*(ptr))))
-#define MYREALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), (len) * sizeof(*(ptr))))
-#define MYBZERO(ptr, len) memset((ptr), 0, (len) * sizeof(*(ptr)))
-#define MYBONE(ptr, len) memset((ptr), 0xff, (len) * sizeof(*(ptr)))
+#define MYREALLOC(ptr, len) ((ptr) = (__typeof__(ptr))realloc((ptr), sizeof(*(ptr)) * (len)))
+#define MYBZERO(ptr, len) memset((ptr), 0, sizeof(*(ptr)) * (len))
+#define MYBONE(ptr, len) memset((ptr), 0xff, sizeof(*(ptr)) * (len))
 #define MYEXPAND(a, m) do { \
     ++(m); \
     kroundup64((m)); \

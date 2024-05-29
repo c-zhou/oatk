@@ -1422,7 +1422,7 @@ static char *strdup1(char *src, uint32_t n)
 {
     char *dst;
     MYMALLOC(dst, n+1);
-    strncpy(dst, src, n);
+    memcpy(dst, src, n);
     dst[n] = '\0';
     return dst;
 }

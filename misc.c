@@ -216,7 +216,7 @@ int run_system_cmd(char *cmd, int retry)
 void check_executable(char *exe)
 {
     char cmd[4096];
-    sprintf(cmd, "%s -h >/dev/null 2>&1", exe);
+    sprintf(cmd, "command -v %s 1>/dev/null 2>/dev/null", exe);
 
     int exit_code = run_system_cmd(cmd, 1);
     if (exit_code == -1 || WEXITSTATUS(exit_code)) {

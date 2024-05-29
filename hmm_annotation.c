@@ -211,6 +211,7 @@ static void *annot_worker_pipeline(void *shared, int step, void *in)
                 is_gfa = 1;
                 if (s->s[0] == 'S') {
                     char *seg, *seq;
+                    seg = seq = NULL;
                     ret = parse_gseq(s->s, &seg, &seq);
                     if (!ret) {
                         fprintf(fo, ">%s\n", seg);
