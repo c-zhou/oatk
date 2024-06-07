@@ -1149,6 +1149,11 @@ int main(int argc, char *argv[])
         return 1;
     }
     
+    if (mito_annot == 0 && pltd_annot == 0) {
+        fprintf(stderr, "[E::%s] provide at least one HMM profile annotation file (-m and/or -p)\n", __func__);
+        return 1;
+    }
+
     if (ec_tag != 0) {
         if(is_valid_gfa_tag(ec_tag)) {
             memcpy(TAG_ARC_COV, ec_tag, 4);

@@ -49,7 +49,7 @@ extern char TAG_SBP_COV[4]; // seq total base coverage
 
 // if the graph size is larger than COMMON_MAX_PLTD_SIZE, the sequence is likely mito
 // size will only include one copy of IR
-static const uint32_t COMMON_MAX_PLTD_SIZE = 200000;
+static const uint32_t COMMON_MAX_PLTD_SIZE = 250000;
 static const uint32_t COMMON_AVG_PLTD_SIZE = 160000;
 static const uint32_t COMMON_MIN_PLTD_SIZE =  80000;
 // pltd to mito score fold difference threshold to consider change organelle type annotation

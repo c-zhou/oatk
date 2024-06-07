@@ -4073,7 +4073,8 @@ og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn,
                     smax == OG_MITO &&
                     g_n[OG_MITO] > 0 &&
                     (a_s[OG_PLTD] < a_s[OG_MITO] * PLTD_TO_MITO_FST[0] ||
-                     clusts[j].size > COMMON_MAX_PLTD_SIZE)) {
+                     (a_s[OG_PLTD] < a_s[OG_MITO] * PLTD_TO_MITO_FST[1] && 
+                      clusts[j].size > COMMON_MAX_PLTD_SIZE))) {
                 // fix OG_TYPE
                 og_t = OG_MITO;
                 if (verbose > 2)
@@ -4104,7 +4105,7 @@ og_component_v *asg_annotation(hmm_annot_db_t *annot_db, asg_t *asg, int no_trn,
                 v = comp_dps[j].index;
                 og_t = sequence_og->a[comp_v[v]].type;
                 fprintf(stderr, "[M::%s] %s [%s #MG=%d #PG=%d] COV=%.3f LEN=%d CLUST=%d\n", __func__,
-                        asg->seg[comp_v[v]].name, OG_TYPES[og_t], comp_dps[v].gene_num[OG_MITO], comp_dps[v].gene_num[OG_PLTD], 
+                        asg->seg[comp_v[v]].name, OG_TYPES[og_t], comp_dps[j].gene_num[OG_MITO], comp_dps[j].gene_num[OG_PLTD], 
                         comp_dps[j].val, comp_dps[j].size, comp_dps[j].clust);
             }
             qsort(comp_dps, nv, sizeof(clust_dp_t), dpIdx_cmpfunc);
