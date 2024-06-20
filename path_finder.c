@@ -93,8 +93,8 @@ FILE *fopen1(char *fn)
     return fo;
 }
 
-static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components, int min_s_len,
-        int max_copy, int min_ext_g, double seq_cf, int do_clean, double min_cf, double min_score, double max_eval,
+static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_component_v *og_components, int min_s_len, 
+        int max_copy, int max_path, int min_ext_g, double seq_cf, int do_clean, double min_cf, double min_score, double max_eval,
         int bubble_size, int tip_size, double weak_cross, char *out_pref, int out_opt, OG_TYPE_t og_type, int VERBOSE)
 {
     assert(og_type == OG_MITO || og_type == OG_PLTD || og_type == OG_MINI);
@@ -289,7 +289,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
         }
         path_v paths;
         kv_init(paths);
-        graph_path_finder(asg_copy, seg_dups, &paths, seq_cf, og_type == OG_PLTD);
+        graph_path_finder(asg_copy, seg_dups, &paths, max_path, seq_cf, og_type == OG_PLTD);
         kh_u32_destroy(seg_dups);
         asg_destroy(asg_copy);
 
@@ -380,7 +380,7 @@ static void parse_organelle_component(asg_t *asg, hmm_annot_db_t *annot_db, og_c
                             fprintf(stderr, "[M::%s] seg copies included subgraph stats\n", __func__);
                             asg_stat(asg_copy1, stderr);
                         }
-                        graph_path_finder(asg_copy1, seg_dups1, &tmp_paths1, seq_cf, og_type == OG_PLTD);
+                        graph_path_finder(asg_copy1, seg_dups1, &tmp_paths1, max_path, seq_cf, og_type == OG_PLTD);
 
                         if (og_type == OG_PLTD) // only for pltd
                             for (j = 0; j < tmp_paths1.n; ++j)
@@ -877,8 +877,8 @@ static int parse_organelle_minicircle(asg_t *asg, hmm_annot_db_t *annot_db, og_c
     return 0;
 }
 
-int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len,
-        int min_ext_g, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len, int min_ext_g, 
+        int max_copy, int max_path, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int n_threads, int VERBOSE)
 {
@@ -929,8 +929,8 @@ do_clean:
     return ret;
 }
 
-int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, int ext_p, int ext_m,
-        int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, int ext_p, int ext_m, 
+        int max_copy, int max_path, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int VERBOSE)
 {
@@ -978,10 +978,10 @@ int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, 
 
     // graph will be changed with extra copies of sequences added
     if (mito_annot)
-        parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, ext_m, seq_cf, do_graph_clean, 
+        parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, max_path, ext_m, seq_cf, do_graph_clean, 
                 min_cf, min_score, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_MITO, VERBOSE);
     if (pltd_annot)
-        parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, ext_p, seq_cf, do_graph_clean, 
+        parse_organelle_component(asg, annot_db, og_components, min_len, max_copy, max_path, ext_p, seq_cf, do_graph_clean, 
                 min_cf, min_score, max_eval, bubble_size, tip_size, weak_cross, out_pref, out_opt, OG_PLTD, VERBOSE);
 
 do_clean:
@@ -1018,6 +1018,7 @@ static ko_longopt_t long_options[] = {
     { "max-copy",       ko_required_argument, 'c' },
     { "max-eval",       ko_required_argument, 'e' },
     { "min-s-len",      ko_required_argument, 'l' },
+    { "max-path",       ko_required_argument, 'N' },
     { "verbose",        ko_required_argument, 'v' },
     { "version",        ko_no_argument,       'V' },
     { "help",           ko_no_argument,       'h' },
@@ -1026,9 +1027,9 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "c:e:f:g:hl:m:o:p:q:s:v:V";
+    const char *opt_str = "c:e:f:g:hl:m:N:o:p:q:s:v:V";
     ketopt_t opt = KETOPT_INIT;
-    int c, out_s, out_c, max_copy, ret = 0;
+    int c, out_s, out_c, max_copy, max_path, ret = 0;
     FILE *fp_help;
     char *out_pref, *mito_annot, *pltd_annot, *ec_tag, *kc_tag, *sc_tag;
     int no_trn, no_rrn, min_len, ext_p, ext_m, bubble_size, tip_size, do_graph_clean;
@@ -1040,6 +1041,7 @@ int main(int argc, char *argv[])
     out_c = 0;
     out_pref = "oatk.asm";
     max_copy = 10;
+    max_path = 1000000;
     fp_help = stderr;
     mito_annot = 0;
     pltd_annot = 0;
@@ -1066,6 +1068,7 @@ int main(int argc, char *argv[])
         else if (c == 'f') seq_cf = atof(opt.arg);
         else if (c == 's') min_score = atof(opt.arg);
         else if (c == 'c') max_copy = atoi(opt.arg);
+        else if (c == 'N') max_path = atoi(opt.arg);
         else if (c == 'g') {
             char *p;
             ext_p = strtol(opt.arg, &p, 10);
@@ -1130,6 +1133,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "  Path-finding:\n");
         fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
         fprintf(fp_help, "    -c INT               maximum copy number to consider [%d]\n", max_copy);
+        fprintf(fp_help, "    -N INT               maximum number of graph paths to explore [%d]\n", max_path);
         fprintf(fp_help, "    --max-bubble INT     maximum bubble size for assembly graph clean [%d]\n", bubble_size);
         fprintf(fp_help, "    --max-tip    INT     maximum tip size for assembly graph clean [%d]\n", tip_size);
         fprintf(fp_help, "    --weak-cross FLOAT   maximum relative edge coverage for weak crosslink clean [%.2f]\n", weak_cross);
@@ -1183,7 +1187,7 @@ int main(int argc, char *argv[])
 
     if (out_s < 0) out_s = 0;
     
-    ret = pathfinder(argv[opt.ind], mito_annot, pltd_annot, min_len, ext_p, ext_m, max_copy, 
+    ret = pathfinder(argv[opt.ind], mito_annot, pltd_annot, min_len, ext_p, ext_m, max_copy, max_path, 
             max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, tip_size, weak_cross,
             out_s, out_pref, VERBOSE);
     

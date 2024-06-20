@@ -125,7 +125,7 @@ void path_v_destroy(path_v *path);
 double graph_sequence_coverage_precise(asg_t *asg, double min_cf, int min_copy, int max_copy, int **copy_number);
 int adjust_sequence_copy_number_by_graph_layout(asg_t *asg, double seq_coverage, double *_adjusted_cov, int *copy_number, int max_copy, int max_round);
 kh_u32_t *sequence_duplication_by_copy_number(asg_t *asg, int *copy_number, int allow_del);
-void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, double sub_circ_minf, int is_pltd);
+void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, int max_path, double sub_circ_minf, int is_pltd);
 path_t make_path_from_str(asg_t *asg, char *path_str, char *sid);
 void path_sort(path_v *paths);
 void path_rotate(asg_t *g, path_t *path, hmm_annot_db_t *annots, OG_TYPE_t og_type);

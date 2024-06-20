@@ -1028,9 +1028,7 @@ static int path_contain_vertex(llnode *node, uint32_t v)
     return contained;
 }
 
-#define PATH_N_LIM 1000000
-
-static llnode **graph_path_extension(asmg_t *g, llnode *root, kh_u32_t *seg_dups, uint64_t *n_leaf, int *exceed_limit_)
+static llnode **graph_path_extension(asmg_t *g, llnode *root, kh_u32_t *seg_dups, int max_path, uint64_t *n_leaf, int *_exceed_limit)
 {
     uint64_t i, j, v, w, nv;
     int skip, exceed_limit;
@@ -1090,7 +1088,7 @@ static llnode **graph_path_extension(asmg_t *g, llnode *root, kh_u32_t *seg_dups
             kv_push(llnodep, leaf_node, node);
         }
         
-        if (kdq_size(node_q) + leaf_node.n > PATH_N_LIM) {
+        if (kdq_size(node_q) + leaf_node.n > max_path) {
             exceed_limit = 1;
             break;
         }
@@ -1102,12 +1100,12 @@ static llnode **graph_path_extension(asmg_t *g, llnode *root, kh_u32_t *seg_dups
 
     if (exceed_limit) {
         *n_leaf = 0;
-        *exceed_limit_ = 1;
+        *_exceed_limit = 1;
         kv_destroy(leaf_node);
         return 0;
     } else {
         *n_leaf = leaf_node.n;
-        *exceed_limit_ = 0;
+        *_exceed_limit = 0;
         return leaf_node.a;
     }
 }
@@ -1193,7 +1191,7 @@ static uint64_t find_source_vtx(asmg_t *g, int use_max_scc)
     return s;
 }
 
-void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, double sub_circ_minf, int is_pltd)
+void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, int max_path, double sub_circ_minf, int is_pltd)
 {
     uint64_t i, j, s, n_leaf;
     int circ, exceed_limit;
@@ -1216,7 +1214,7 @@ void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, double sub
 
     n_leaf = 0;
     exceed_limit = 0;
-    leaves = graph_path_extension(g, root, seg_dups, &n_leaf, &exceed_limit);
+    leaves = graph_path_extension(g, root, seg_dups, max_path, &n_leaf, &exceed_limit);
     // for linear paths do extension from the other direction of root node
     // no - should do this even if the path is circular
     // n_leaf will be zero if path number exceeds limit
@@ -1242,21 +1240,24 @@ void graph_path_finder(asg_t *asg, kh_u32_t *seg_dups, path_v *paths, double sub
         assert(root->v == (s<<1 | 1)); // should be always ended with seq s
         uint64_t n = 0;
         exceed_limit = 0;
-        llnode **tmp_nodes = graph_path_extension(g, root, seg_dups, &n, &exceed_limit);
+        llnode **tmp_nodes = graph_path_extension(g, root, seg_dups, max_path, &n, &exceed_limit);
         
         for (j = 0; j < n; ++j)
             kv_push(llnodep, leaf_node, tmp_nodes[j]);
         free(tmp_nodes);
 
-        if (exceed_limit || leaf_node.n > PATH_N_LIM) {
+        if (exceed_limit || leaf_node.n > max_path) {
             exceed_limit = 1;
             break;
         }
     }
     free(leaves);
 
-    if (exceed_limit)
+    if (exceed_limit) {
+        fprintf(stderr, "[W::%s] path exploration exceeds limit %d\n", __func__, max_path);
+        fprintf(stderr, "[W::%s] consider an larger value of '-N'\n", __func__);
         goto final_clean;
+    }
 
 #ifdef DEBUG_PATH_FINDER
     fprintf(stderr, "[DEBUG_PATH_FINDER::%s] number leaf nodes: %lu\n", __func__, leaf_node.n);

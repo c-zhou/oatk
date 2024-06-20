@@ -54,12 +54,12 @@ int syncasm(char **file_in, int n_file, size_t m_data, int k, int s, int bubble_
 int hmm_annotate(char **file_in, int n_file, char *nhmmscan, char *nhmmdb, FILE *fo, uint32_t max_batch_size, 
         uint32_t max_batch_num, int n_threads, char *tmpdir);
 
-int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, int ext_p, int ext_m,
-        int max_copy, double max_eval, double min_score, double min_cf, double seq_cf, int no_trn, int no_rrn,
+int pathfinder(char *asg_file, char *mito_annot, char *pltd_annot, int min_len, int ext_p, int ext_m, int max_copy, 
+        int max_path, double max_eval, double min_score, double min_cf, double seq_cf, int no_trn, int no_rrn,
         int do_graph_clean, int bubble_size, int tip_size, double weak_cross, int out_opt, char *out_pref, int VERBOSE);
 
-int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len,
-        int min_ex_g, int max_copy, double max_eval, double min_score, double min_cf, double seq_cf,
+int pathfinder_minicircle(char *asg_file, char *mini_annot, scg_meta_t *scg_meta, int min_len, int min_ex_g, 
+        int max_copy, int max_path, double max_eval, double min_score, double min_cf, double seq_cf,
         int no_trn, int no_rrn, int do_graph_clean, int bubble_size, int tip_size, double weak_cross,
         int out_opt, char *out_pref, int n_threads, int VERBOSE);
 
@@ -103,6 +103,7 @@ static ko_longopt_t long_options[] = {
     { "min-s-length",   ko_required_argument, 'l' },
     { "min-s-cov",      ko_required_argument, 'q' },
     { "max-copy",       ko_required_argument, 'C' },
+    { "max-path",       ko_required_argument, 'N' },
     { "verbose",        ko_required_argument, 'v' },
     { "version",        ko_no_argument,       'V' },
     { "help",           ko_no_argument,       'h' },
@@ -111,10 +112,10 @@ static ko_longopt_t long_options[] = {
 
 int main(int argc, char *argv[])
 {
-    const char *opt_str = "a:b:c:C:D:e:f:g:Ghk:l:m:Mo:p:q:s:S:t:T:v:V";
+    const char *opt_str = "a:b:c:C:D:e:f:g:Ghk:l:m:MN:o:p:q:s:S:t:T:v:V";
     ketopt_t opt = KETOPT_INIT;
     int k, s, bubble_size, tip_size, min_k_cov, batch_size;
-    int out_s, out_c, n_db, max_copy, min_len, ext_p, ext_m;
+    int out_s, out_c, n_db, max_copy, max_path, min_len, ext_p, ext_m;
     int mini_circle, n_threads;
     double min_a_cov_f, weak_cross, max_eval, min_score, min_cf, seq_cf;
     int do_ec, do_unzip, input_asg, do_graph_clean, no_trn, no_rrn;
@@ -153,6 +154,7 @@ int main(int argc, char *argv[])
     out_s = -1;
     out_c = 0;
     max_copy = 10;
+    max_path = 1000000;
     no_trn = 1;
     no_rrn = 1;
     do_graph_clean = 1;
@@ -198,6 +200,7 @@ int main(int argc, char *argv[])
         else if (c == 'l') min_len = atoi(opt.arg);
         else if (c == 'q') min_cf = atof(opt.arg);
         else if (c == 'C') max_copy = atoi(opt.arg);
+        else if (c == 'N') max_path = atoi(opt.arg);
         else if (c == 't') n_threads = atoi(opt.arg);
         else if (c == 'M') mini_circle = 1;
         else if (c == 'G') input_asg = 1;
@@ -271,6 +274,7 @@ int main(int argc, char *argv[])
         fprintf(fp_help, "    -l INT               minimum length of a singleton sequence to keep [%d]\n", mini_circle? 5000 : 10000);
         fprintf(fp_help, "    -q FLOAT             minimum coverage of a sequence compared to the subgraph average [%.2f]\n", min_cf);
         fprintf(fp_help, "    -C INT               maximum copy number to consider [%d]\n", max_copy);
+        fprintf(fp_help, "    -N INT               maximum number of graph paths to explore [%d]\n", max_path);
         fprintf(fp_help, "    --include-trn        include tRNA genes for sequence classification\n");
         fprintf(fp_help, "    --include-rrn        include rRNA genes for sequence classification\n");
         fprintf(fp_help, "    --no-graph-clean     do not do assembly graph clean\n");
@@ -433,10 +437,10 @@ int main(int argc, char *argv[])
     /*** pathfinder ***/
     if (mini_circle) // pathfinder in mini-circle mode
         ret = pathfinder_minicircle(asg_file, mito_db? mito_annot : pltd_annot, scg_meta, min_len, ext_p, max_copy, 
-                max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, 
+                max_path, max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, 
                 tip_size, weak_cross, out_s, outpref, n_threads, VERBOSE);
     else // pathfinder in normal mode
-        ret = pathfinder(asg_file, mito_annot, pltd_annot, min_len, ext_p, ext_m, max_copy, 
+        ret = pathfinder(asg_file, mito_annot, pltd_annot, min_len, ext_p, ext_m, max_copy, max_path,
                 max_eval, min_score, min_cf, seq_cf, no_trn, no_rrn, do_graph_clean, bubble_size, 
                 tip_size, weak_cross, out_s, outpref, VERBOSE);
 
