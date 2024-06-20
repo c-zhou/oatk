@@ -2,7 +2,7 @@
 
 ## Overview
 
-Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. It can also be used to assemble other simple organelle genomes such as animal mitochondria. The toolkit consists of four major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmm_annotation` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `pathfinder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure. `oatk` is a wrapper for running `syncasm`, `hmm_annotation` and `pathfinder` collectively. There is also an auxiliary tool `path_to_fasta` used to extract FASTA sequences from a [GFA format](https://github.com/GFA-spec/GFA-spec) file given a path.
+Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. It can also be used to assemble other simple organelle genomes such as animal mitochondria. The toolkit consists of four major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmmannot` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `pathfinder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure. `oatk` is a wrapper for running `syncasm`, `hmmannot` and `pathfinder` collectively. There is also an auxiliary tool `path_to_fasta` used to extract FASTA sequences from a [GFA format](https://github.com/GFA-spec/GFA-spec) file given a path.
 
 ![oatk](https://github.com/c-zhou/oatk/assets/11916266/dca0e73b-e3aa-49ca-b3b6-18a53936cdca)
 
@@ -12,12 +12,12 @@ You need to have a C compiler, GNU make and zlib development files installed. Do
 
 ## Dependencies
 
-- You need the [nhmmscan](http://hmmer.org/) executable to run `oatk` and `hmm_annotation`. It could be made available to the program through the environmental path or specified as a program parameter.
-- You also need the organelle gene profile database to run `oatk` and `hmm_annotation`. It could be downloaded from [OatkDB](https://github.com/c-zhou/OatkDB.git). There are many pre-built databases ready to use. You can also build your own database following the instructions on that page. For land plant organelles, while there are databases for several lower-rank taxonomies, the embryophyta is the recommended one to start with.
+- You need the [nhmmscan](http://hmmer.org/) executable to run `oatk` and `hmmannot`. It could be made available to the program through the environmental path or specified as a program parameter.
+- You also need the organelle gene profile database to run `oatk` and `hmmannot`. It could be downloaded from [OatkDB](https://github.com/c-zhou/OatkDB.git). There are many pre-built databases ready to use. You can also build your own database following the instructions on that page. For land plant organelles, while there are databases for several lower-rank taxonomies, the embryophyta is the recommended one to start with.
 
 ## Run Oatk
 
-The easiest way is to use the `oatk` wrapper. Internally, it consecutively runs three modules: HiFi read assembly with `syncasm`, HMM annotation with `hmm_annotation` and organelle genome extraction with `pathfinder`. You can also run three components separately as detailed below.
+The easiest way is to use the `oatk` wrapper. Internally, it consecutively runs three modules: HiFi read assembly with `syncasm`, HMM annotation with `hmmannot` and organelle genome extraction with `pathfinder`. You can also run three components separately as detailed below.
 
 The `oatk` program also allows you to extract organelle genomes from your own genome assembly graph built from such as [MBG](https://github.com/maickrau/MBG), [Spades](https://github.com/ablab/spades) or [Hifiasm](https://github.com/chhylp123/hifiasm). To do this, you need to include the `-G` option amd the input sequence file(s) needs to be replaced by a GFA file. It should be noted that `oatk` (and `pathfinder`) highly relies on the sequence and arc coverage (especially the sequence coverage) to solve the genome structure, so the overlap/string graphs constructed from many long-read assemblers (e.g., Hifiasm) are not ideal for complete organelle genome construction. Also, different assemblers use different tags for sequence and arc coverage in the GFA file. By default, `oatk` (and `pathfinder`) uses `KC:i`, `SC:i` and `EC:i` as the tag for kmer, sequence and arc coverage respectively, where the value of kmer coverage is approximately equal to the product of the sequence coverage and the sequence length. This is the default output format for `syncasm`. When you use GFA inputs from other assemblers, you may need to explicitly pass this information to `oatk` (and `pathfinder`) with `--kmer-c-tag` (or `--seq-c-tag`) and `--edge-c-tag` options. For example, with MBG output, you need to specify `--kmer-c-tag FC:f` and `--edge-c-tag ec:i`, otherwise, all coverage values will be considered as 1, and will probably lead to incorrect genome structures.
 
@@ -50,8 +50,8 @@ The positional parameter specifies the input PacBio HiFi data file. The program 
 Upon a successful run, the command will generate these major files:
 ~~~
 ddAraThal4.utg.final.gfa     the GFA file for the final genome assembly             | syncasm
-ddAraThal4.annot_mito.txt    the MT gene annotation file for assembled sequences    | hmm_annotation
-ddAraThal4.annot_pltd.txt    the PT gene annotation file for assembled sequences    | hmm_annotation
+ddAraThal4.annot_mito.txt    the MT gene annotation file for assembled sequences    | hmmannot
+ddAraThal4.annot_pltd.txt    the PT gene annotation file for assembled sequences    | hmmannot
 ddAraThal4.mito.gfa          the subgraph for the MT genome                         | pathfinder
 ddAraThal4.mito.bed          the gene annotation for the MT sequences               | pathfinder
 ddAraThal4.mito.ctg.fasta    the structure-solved MT contigs                        | pathfinder
@@ -76,10 +76,10 @@ The major file generated is `ddAraThal4.utg.final.gfa` for the GFA file of the f
 
 #### 2. HMM annotation
 
-Here is an example to run `hmm_annotation`,
+Here is an example to run `hmmannot`,
 
-    hmm_annotation -t 8 --nhmmscan /bin/nhmmscan -o ddAraThal4.annot_mito.txt embryophyta_mito.fam ddAraThal4.utg.final.gfa
-    hmm_annotation -t 8 --nhmmscan /bin/nhmmscan -o ddAraThal4.annot_pltd.txt embryophyta_pltd.fam ddAraThal4.utg.final.gfa
+    hmmannot -t 8 --nhmmscan /bin/nhmmscan -o ddAraThal4.annot_mito.txt embryophyta_mito.fam ddAraThal4.utg.final.gfa
+    hmmannot -t 8 --nhmmscan /bin/nhmmscan -o ddAraThal4.annot_pltd.txt embryophyta_pltd.fam ddAraThal4.utg.final.gfa
  
 Three optional and two positional parameters are set in this example:
 
