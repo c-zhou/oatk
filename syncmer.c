@@ -170,13 +170,12 @@ uint64_t MurmurHash64A(const void *key, uint32_t len, uint64_t seed)
 }
 
 #ifdef DEBUG_KMER_EXTRACTION
-static uint64_t kmer_hash64(uint64_t sid, uint8_t *s, uint32_t p, int w)
+static uint64_t kmer_hash64(uint64_t sid, uint8_t *s, uint32_t p, int w, uint8_t *key)
 #else
-static uint64_t kmer_hash64(uint8_t *s, uint32_t p, int w)
+static uint64_t kmer_hash64(uint8_t *s, uint32_t p, int w, uint8_t *key)
 #endif
 {
     uint64_t h64;
-    uint8_t *key;
     int i, j, rev, res, p0, p1, b, c;
 
     rev = p & 1, p >>= 1;
@@ -186,8 +185,7 @@ static uint64_t kmer_hash64(uint8_t *s, uint32_t p, int w)
 
     // res = rev? 6 - p1 % 4 * 2 : p0 % 4 * 2; // shift bits
     res = rev? ((p1&3)^3)<<1 : (p0&3)<<1;
-    b = p1 / 4 - p0 / 4 + 1; // number bytes holding syncmer
-    MYMALLOC(key, b);
+    b = p1 / 4 - p0 / 4 + 1; // number bytes holding syncmer sequence
     memcpy(key, s + p0 / 4, b);
     // key[b-1] needs bit shift
     // when the last byte is partially filled
@@ -207,13 +205,16 @@ static uint64_t kmer_hash64(uint8_t *s, uint32_t p, int w)
         key[i] |= key[i+1] >> (8-res);
     }
     key[b-1] <<= res;
+
+    // real bytes
+    b = (w - 1) / 4 + 1;
     // mask the lower bits
     key[b-1] &= lmask[w&3];
 
-    h64 = MurmurHash64A(key, (w - 1) / 4 + 1, murmur3_seed);
+    h64 = MurmurHash64A(key, b, murmur3_seed);
 
 #ifdef DEBUG_KMER_EXTRACTION
-    fprintf(stderr, "[DEBUG_KMER_EXTRACTION::%s] sid:%lu p0:%d p1:%d rev:%d ", __func__, sid, p0, p1, rev);
+    fprintf(stderr, "[DEBUG_KMER_EXTRACTION::%s] sid:%lu p0:%d p1:%d rev:%d bit:%d hash:%lu ", __func__, sid, p0, p1, rev, b, h64);
     for (i = 0; i < p1 - p0 + 1; ++i)
         // fputc(char_nt4_table[(key[i / 4] >> (3 - i % 4) * 2) & 3], stderr);
         fputc(char_nt4_table[(key[i/4]>>(((i&3)^3)<<1)) & 3], stderr);
@@ -221,8 +222,6 @@ static uint64_t kmer_hash64(uint8_t *s, uint32_t p, int w)
     fputc('\n', stderr);
 #endif
 
-    free(key);
-    
     return h64;
 }
 
@@ -246,10 +245,12 @@ static void *sr_read_analysis_thread(void *args)
     p_data_t *dat = (p_data_t *) args;
     
     int len, k, w; 
+    uint8_t *key;
     char *seq;
     k = dat->sr_db->s, w = dat->sr_db->k;
     assert(k > 0 && k < 32 && w > k);
 
+    MYMALLOC(key, (w - 1) / 4 + 2);
     int r;
     for (r = 0; r < dat->n_reads; ++r) {
         sr_t sr;
@@ -326,9 +327,9 @@ static void *sr_read_analysis_thread(void *args)
                 kv_push(uint64_t, s_mer, buf_s[buf_pos]);
                 kv_push(uint32_t, m_pos, (hoco_l - w - 1) << 1 | z);
 #ifdef DEBUG_KMER_EXTRACTION
-                kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+                kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #else
-                kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
+                kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #endif
                 // remove syncmers at the same position on a read
                 // this is possible as a syncmer could start and end with the same smer
@@ -344,9 +345,9 @@ static void *sr_read_analysis_thread(void *args)
                     kv_push(uint64_t, s_mer, s^1);
                     kv_push(uint32_t, m_pos, (hoco_l - w) << 1 | z);
 #ifdef DEBUG_KMER_EXTRACTION
-                    kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #else
-                    kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #endif
                 }
                 if (m < mz) mz = m, mz_pos = buf_pos;
@@ -367,9 +368,9 @@ static void *sr_read_analysis_thread(void *args)
                     kv_push(uint64_t, s_mer, s^1);
                     kv_push(uint32_t, m_pos, (hoco_l - w) << 1 | z);
 #ifdef DEBUG_KMER_EXTRACTION
-                    kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #else
-                    kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
+                    kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #endif
                 }
             }
@@ -384,9 +385,9 @@ static void *sr_read_analysis_thread(void *args)
             kv_push(uint64_t, s_mer, buf_s[buf_pos]);
             kv_push(uint32_t, m_pos, (hoco_l - w) << 1 | z); // not (hoco_l - w - 1) as hoco_l no self increment yet
 #ifdef DEBUG_KMER_EXTRACTION
-            kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w));
+            kv_push(uint64_t, k_mer, kmer_hash64(sr.sid, hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #else
-            kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w));
+            kv_push(uint64_t, k_mer, kmer_hash64(hoco_s.a, m_pos.a[m_pos.n-1], w, key));
 #endif
             if (m_pos.n >= 2 && m_pos.a[m_pos.n-1] >> 1 == m_pos.a[m_pos.n-2] >> 1) s_mer.n -= 2, m_pos.n -= 2, k_mer.n -= 2;
         }
@@ -412,7 +413,9 @@ static void *sr_read_analysis_thread(void *args)
 
         free(seq);
     }
-    
+
+    free(key);
+
     return NULL;
 }
 
@@ -1144,6 +1147,8 @@ static void fputs_kmer(uint8_t *s, uint32_t p, int w, FILE *fo)
         key[i] |= key[i+1] >> (8-res);
     }
     key[b-1] <<= res;
+    // real bytes
+    b = (w - 1) / 4 + 1;
     // mask the lower bits
     key[b-1] &= lmask[w&3];
 
@@ -1308,6 +1313,8 @@ static void process_kmer_cluster(uint128_t *scm, uint32_t n, syncmer_db_t *scm_d
                 kmer[i] |= kmer[i+1] >> (8-res);
             }
             kmer[b-1] <<= res;
+            // real bytes
+            b = (k - 1) / 4 + 1;
             // mask the lower bits
             kmer[b-1] &= lmask[k&3];
             // mask the remaining bytes
