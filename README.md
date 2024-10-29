@@ -1,4 +1,4 @@
-# Oatk: an organelle genome assembly toolkit [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7631376.svg)](https://doi.org/10.5281/zenodo.7631376)
+# Oatk: an organelle genome assembly toolkit [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.7631376.svg)](https://doi.org/10.5281/zenodo.7631376)[![install with bioconda](https://img.shields.io/badge/install%20with-bioconda-brightgreen.svg?style=flat)](http://bioconda.github.io/recipes/oatk/README.html)[![install with nextflow](https://img.shields.io/badge/install%20with-nextflow-brightgreen.svg?style=flat)](https://nf-co.re/modules/oatk)
 
 ## Overview
 
@@ -8,7 +8,11 @@ Oatk is designed for *de novo* assembly of complex plant organelle genomes using
 
 ## Installation
 
-You need to have a C compiler, GNU make and zlib development files installed. Download the source code from this repo or with `git clone https://github.com/c-zhou/oatk.git`. Then type `make` in the source code directory to compile.
+To compile Oatk from source code, you need to have a C compiler, GNU make and zlib development files installed. Download the source code from this repo or with `git clone https://github.com/c-zhou/oatk.git`. Then type `make` in the source code directory to compile.
+
+Oatk can also be installed from [BioConda](https://bioconda.github.io/recipes/oatk/README.html) via `conda install -c bioconda oatk` or as a [Nextflow nf-core module](https://nf-co.re/modules/oatk) via `nf-core modules install oatk`.
+
+
 
 ## Dependencies
 
@@ -111,3 +115,5 @@ The major output files are the organelle subgraph files, contig FASTA files and 
 
 ***path_to_fasta*** is a tool used to extract FASTA sequences from a GFA file with a path. For example, `path_to_fasta oatk_utg_final.gfa u1+,u2-,u3-,u2+`.
 
+## Citation
+Chenxi Zhou, Max Brown, Mark Blaxter, The Darwin Tree of Life Project Consortium, Shane A. McCarthy, Richard Durbin. Oatk: a de novo assembly tool for complex plant organelle genomes. bioRxiv 2024.10.23.619857; doi: https://doi.org/10.1101/2024.10.23.619857
