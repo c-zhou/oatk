@@ -4,7 +4,7 @@ CFLAGS=		-g -Wall -O3 -Wno-unused-function
 CPPFLAGS=
 INCLUDES=	
 OBJS=
-PROG=		syncasm hmmannot pathfinder path_to_fasta oatk
+PROG=		syncasm hmmannot pathfinder path_to_fasta rotate oatk
 PROG_EXTRA=
 LIBS=		-lm -lz -lpthread
 DESTDIR=	~/bin
@@ -35,6 +35,9 @@ pathfinder: path_finder.c syncasm.c syncmer.c syncerr.c levdist.c path.c graph.c
 
 path_to_fasta: path_to_fasta.c path.c graph.c hmmannot.c misc.c kalloc.c kopen.c
 		$(CC) $(CFLAGS) path_to_fasta.c path.c graph.c hmmannot.c misc.c kalloc.c kopen.c -o $@ -L. $(LIBS) $(INCLUDES)
+
+rotate: rotate.c sstream.c misc.c kalloc.c kopen.c
+		$(CC) $(CFLAGS) rotate.c sstream.c misc.c kalloc.c kopen.c -o $@ -L. $(LIBS) $(INCLUDES)
 
 oatk: oatk.c run_syncasm.c run_hmmannot.c path_finder.c hmmannot.c syncasm.c syncmer.c syncerr.c levdist.c path.c graph.c alignment.c sstream.c misc.c kalloc.c kopen.c kthread.c
 		$(CC) $(CFLAGS) oatk.c run_syncasm.c run_hmmannot.c path_finder.c hmmannot.c syncasm.c syncmer.c syncerr.c levdist.c path.c graph.c alignment.c sstream.c misc.c kalloc.c kopen.c kthread.c -o $@ -L. $(LIBS) $(INCLUDES)

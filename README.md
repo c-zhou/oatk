@@ -2,7 +2,7 @@
 
 ## Overview
 
-Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. It can also be used to assemble other simple organelle genomes such as animal mitochondria. The toolkit consists of four major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmmannot` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `pathfinder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure. `oatk` is a wrapper for running `syncasm`, `hmmannot` and `pathfinder` collectively. There is also an auxiliary tool `path_to_fasta` used to extract FASTA sequences from a [GFA format](https://github.com/GFA-spec/GFA-spec) file given a path.
+Oatk is designed for *de novo* assembly of complex plant organelle genomes using PacBio HiFi data. It can also be used to assemble other simple organelle genomes such as animal mitochondria. The toolkit consists of four major tools. `syncasm` is a *de novo* HiFi read assembler using a sparse de Bruijn graph constructed from closed syncmers ([Edgar, R. 2021](https://peerj.com/articles/10805/)). `hmmannot` is a [HMMER](http://hmmer.org/) wrapper for convenient annotation of organelle sequences using a pre-built HMM profile database which is available at [OatkDB](https://github.com/c-zhou/OatkDB.git). `pathfinder` is a tool used for parsing and circularising organelle genomes from the assembled sequences combining the HMM annotations and assembly graph structure. `oatk` is a wrapper for running `syncasm`, `hmmannot` and `pathfinder` collectively. There are also auxiliary tools `path_to_fasta` used to extract FASTA sequences from a [GFA format](https://github.com/GFA-spec/GFA-spec) file given a path, and `rotate` used to rotate a (circular) sequence given a position.
 
 ![oatk](https://github.com/c-zhou/oatk/assets/11916266/dca0e73b-e3aa-49ca-b3b6-18a53936cdca)
 
@@ -114,6 +114,8 @@ The major output files are the organelle subgraph files, contig FASTA files and 
 ## Other auxiliary tools
 
 ***path_to_fasta*** is a tool used to extract FASTA sequences from a GFA file with a path. For example, `path_to_fasta oatk_utg_final.gfa u1+,u2-,u3-,u2+`.
+
+***rotate*** is a tool used to rotate a (circular) sequence from a given position. For example, `rotate -r asm.fa seq1 6` will rotate the sequence `seq1` at postion `6` (1-base) from the reverse strand. If `seq1` is `ACGTAGATGA`, then the resulted sequence will be `CTACGTTCAT`.
 
 ## Citation
 Chenxi Zhou, Max Brown, Mark Blaxter, The Darwin Tree of Life Project Consortium, Shane A. McCarthy, Richard Durbin. Oatk: a de novo assembly tool for complex plant organelle genomes. bioRxiv 2024.10.23.619857; doi: https://doi.org/10.1101/2024.10.23.619857

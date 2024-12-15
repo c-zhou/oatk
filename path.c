@@ -1562,7 +1562,7 @@ static void array_left_rotate(uint32_t arr[], uint32_t d, uint32_t n)
 }
 
 KHASHL_MAP_INIT(KH_LOCAL, kh_str_t, kh_str, kh_cstr_t, uint64_t, kh_hash_str, kh_eq_str)
-KHASHL_MAP_INIT(KH_LOCAL, kh_s32_t, kh_s32, khint32_t, uint32_t, kh_hash_dummy, kh_eq_generic);
+KHASHL_MAP_INIT(KH_LOCAL, kh_s32_t, kh_s32, khint32_t, uint32_t, kh_hash_dummy, kh_eq_generic)
 
 static double path_rotate_core(asg_t *g, path_t *path, hmm_annot_db_t *annots, OG_TYPE_t og_type)
 {

@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <zlib.h>
 
 #include "ketopt.h"
@@ -56,17 +57,16 @@ int main(int argc, char *argv[])
     ketopt_t opt = KETOPT_INIT;
     int c, force_linear, line_width, gap_size, ret = 0;
     asg_t *g;
-    FILE *fp_help, *out_seqs;
-    char *out, *seq_id, *path_file, *path_str;
+    FILE *fp_help;
+    char *seq_id, *path_file, *path_str;
     
     sys_init();
 
     fp_help = stderr;
-    out_seqs = stdout;
     force_linear = 0;
     line_width = 60;
     gap_size = 100;
-    out = seq_id = path_file = path_str = 0;
+    seq_id = path_file = path_str = 0;
 
     while ((c = ketopt(&opt, argc, argv, 1, opt_str, long_options)) >=0 ) {
         if (c == 's') seq_id = opt.arg;
@@ -78,7 +78,10 @@ int main(int argc, char *argv[])
         else if (c == 'h') fp_help = stdout;
         else if (c == 'o') {
             if (strcmp(opt.arg, "-") != 0) {
-                out = opt.arg;
+                if (freopen(opt.arg, "wb", stdout) == NULL) {
+                    fprintf(stderr, "[ERROR]\033[1;31m failed to write the output to file '%s'\033[0m: %s\n", opt.arg, strerror(errno));
+                    return 1;
+                }
             }
         }
         else if (c == 'V') {
@@ -131,14 +134,6 @@ int main(int argc, char *argv[])
     }
 
     if (line_width == 0) line_width = INT32_MAX;
-
-    if (out) {
-        out_seqs = fopen(out, "w");
-        if (!out_seqs) {
-            fprintf(stderr, "[E::%s] failed to open file %s to write\n", __func__, out);
-            return 1;
-        }
-    }
 
     g = asg_read(argv[opt.ind]);
     if (g == 0) {
@@ -195,7 +190,7 @@ int main(int argc, char *argv[])
 
     size_t i;
     for (i = 0; i < paths.n; ++i)
-        print_seq(g, &paths.a[i], out_seqs? out_seqs : stdout, i+1, force_linear, line_width, gap_size);
+        print_seq(g, &paths.a[i], stdout, i+1, force_linear, line_width, gap_size);
     
     for (i = 0; i < paths.n; ++i)
         path_destroy(&paths.a[i]);
@@ -203,16 +198,13 @@ int main(int argc, char *argv[])
 
     if (ret) {
         fprintf(stderr, "[E::%s] failed to analysis the GFA file\n", __func__);
-        exit(EXIT_FAILURE);
+        exit(1);
     }
 
     if (fflush(stdout) == EOF) {
         fprintf(stderr, "[E::%s] failed to write the results\n", __func__);
-        exit(EXIT_FAILURE);
+        exit(1);
     }
-
-    if (out_seqs)
-        fclose(out_seqs);
 
     asg_destroy(g);
 
