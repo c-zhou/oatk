@@ -317,6 +317,7 @@ static void *sr_read_analysis_thread(void *args)
                 // ambiguous bases are converted to base 'A'
                 // ambiguous bases are not homopolymer compressed
                 // hoco_s.a[hoco_s.n - 1] <<= 2;
+                kv_push(uint8_t, ho_rl, 0);
                 kv_push(uint32_t, n_nucl, i);
                 l = 0;
             }

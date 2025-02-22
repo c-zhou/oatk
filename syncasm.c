@@ -920,7 +920,14 @@ int64_t scg_syncmer_consensus(sr_db_t *sr_db, syncmer_t *scm, int rev, int64_t b
         break;
     }
     
-    assert(i < n_seq);
+    // assert(i < n_seq);
+    if (i == n_seq) {
+        // TODO fix this
+        // fill with 'N's
+        for (i = 0; i < l; ++i)
+            kputc_('N', c_seq);
+        return bl;
+    }
 
     if (!r) p += beg;
     get_kmer_seq(s->hoco_s, p, l, r, kmer_s);
